@@ -20,5 +20,7 @@ async def handler(event):
         except Exception as e:
             print(f"Error: {e}")
 
+print("Bot starting...")
+client.start()  # This line was missing - it connects + authorizes
 print("Bot started - mirroring videos only")
 client.run_until_disconnected()
