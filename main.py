@@ -29,23 +29,18 @@ CONFIG_MSG_ID = None
 # --- Config helpers ---
 async def find_or_create_config():
     global CONFIG_MSG_ID
+    # Only search for existing pinned config, never create
     try:
-        async for msg in client.iter_messages(LOG_CHANNEL, limit=20):
+        async for msg in client.iter_messages(LOG_CHANNEL, limit=50):
             if msg and msg.text and msg.text.startswith('{"sources":') and msg.pinned:
                 CONFIG_MSG_ID = msg.id
-                print(f"Found config at message ID {CONFIG_MSG_ID}")
+                print(f"Found existing config at message ID {CONFIG_MSG_ID}")
                 return
     except Exception as e:
-        print(f"Error searching messages: {e}")
+        print(f"Error searching for config: {e}")
 
-    try:
-        msg = await client.send_message(LOG_CHANNEL, '{"sources": []}')
-        await client.pin_message(LOG_CHANNEL, msg.id, notify=False)
-        CONFIG_MSG_ID = msg.id
-        print(f"Created new config at ID {CONFIG_MSG_ID}")
-    except Exception as e:
-        print(f"CRITICAL: Cannot create config message: {e}")
-        CONFIG_MSG_ID = None
+    print("CRITICAL: No pinned config found. Pin a message with {\"sources\": []} first.")
+    CONFIG_MSG_ID = None
 
 async def load_config():
     global CONFIG_MSG_ID
@@ -68,16 +63,14 @@ async def save_config(sources):
     if not CONFIG_MSG_ID:
         await find_or_create_config()
     if not CONFIG_MSG_ID:
-        print("Cannot save config - no message ID")
+        print("Cannot save config - no pinned message found")
         return
     data = json.dumps({'sources': list(sources)})
     try:
         await client.edit_message(LOG_CHANNEL, CONFIG_MSG_ID, data)
     except MessageIdInvalidError:
-        print("Config message deleted. Recreating...")
+        print("Pinned config was deleted. Please pin a new one.")
         CONFIG_MSG_ID = None
-        await find_or_create_config()
-        await save_config(sources)
     except Exception as e:
         print(f"Failed to save config: {e}")
 
@@ -89,7 +82,7 @@ async def reload_sources():
 # --- Dupe tracking via Botlogs ---
 async def get_last_ids():
     last_ids = {}
-    async for msg in client.iter_messages(LOG_CHANNEL, limit=500):
+    async for msg in client.iter_messages(LOG_CHANNEL, limit=1000):
         if msg.text and ':' in msg.text and not msg.text.startswith('/') and not msg.text.startswith('{'):
             try:
                 sid, mid = msg.text.split(':')
@@ -216,7 +209,7 @@ async def reload_handler(event):
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/scan'))
 async def scan_handler(event):
-    await event.reply("Starting full rescan of all sources. This ignores history and re-downloads everything.")
+    await event.reply("Starting full rescan. This ignores history and re-downloads everything.")
     sources = await load_config()
     for source in sources:
         await event.reply(f"Scanning {source}...")
