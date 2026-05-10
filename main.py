@@ -1,122 +1,242 @@
 import os
+import json
 import asyncio
 import logging
+import time
+import psutil
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError
 from supabase import create_client, Client
 
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Railway Variables
+# ENV VARS
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-SESSION_STRING = os.environ.get("SESSION_STRING")
+SESSION_STRING = os.environ["SESSION_STRING"]
+ADMIN_ID = int(os.environ["ADMIN_ID"])
 LOG_CHANNEL = int(os.environ["LOG_CHANNEL"])
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
-# Supabase setup
+# SETTINGS
+MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB cap you set
+
+# Init
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Globals loaded from DB
-MAPPINGS = {}
-LAST_IDS = {}
+# Config storage
+CONFIG = {"sources": {}}
+TABLE_NAME = "mappings"
+start_time = time.time()
+copied_count = 0
+scraped_count = 0
+skipped_count = 0
 
 async def load_config():
-    global MAPPINGS, LAST_IDS
+    global CONFIG
     try:
-        data = supabase.table("config").select("*").eq("id", 1).execute()
+        data = supabase.table(TABLE_NAME).select("*").execute()
         if data.data:
-            MAPPINGS = data.data[0]["mappings"] or {}
-            LAST_IDS = {int(k): v for k, v in (data.data[0]["last_ids"] or {}).items()}
-            logger.info(f"Loaded {len(MAPPINGS)} mappings from Supabase")
+            CONFIG["sources"] = {str(row["source_id"]): str(row["target_id"]) for row in data.data}
+            logger.info(f"Loaded {len(CONFIG['sources'])} mappings from Supabase")
         else:
-            logger.info("No config found. Starting empty.")
+            CONFIG = {"sources": {}}
     except Exception as e:
-        logger.error(f"Failed to load config: {e}")
+        logger.error(f"Failed to load from Supabase: {e}")
+        CONFIG = {"sources": {}}
 
 async def save_config():
     try:
-        supabase.table("config").update({
-            "mappings": MAPPINGS,
-            "last_ids": {str(k): v for k, v in LAST_IDS.items()}
-        }).eq("id", 1).execute()
-        logger.info("Config saved to Supabase")
+        supabase.table(TABLE_NAME).delete().neq("source_id", 0).execute()
+        rows = [{"source_id": int(k), "target_id": int(v)} for k, v in CONFIG["sources"].items()]
+        if rows:
+            supabase.table(TABLE_NAME).insert(rows).execute()
+        logger.info("Saved to Supabase")
     except Exception as e:
-        logger.error(f"Failed to save config: {e}")
+        logger.error(f"Failed to save to Supabase: {e}")
 
-# Telethon client
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-
-@client.on(events.NewMessage(pattern="/start"))
+@client.on(events.NewMessage(pattern='/start'))
 async def start(event):
-    await event.reply("Bot online. Using Supabase for storage.\n\n**Commands:**\n`/addsource source_id target_id`\n`/removesource source_id`\n`/listmappings`")
+    if event.sender_id!= ADMIN_ID:
+        return
+    await event.reply(
+        "Video-only bot online.\n"
+        f"Max file size: `{MAX_FILE_SIZE/1024/1024:.0f}MB`\n\n"
+        "**Commands:**\n"
+        "/addsource `source_id` `target_id`\n"
+        "/removesource `source_id`\n"
+        "/listmappings\n"
+        "/scrape `source_id`\n"
+        "/stats\n"
+        "/help"
+    )
 
-@client.on(events.NewMessage(pattern="/addsource"))
+@client.on(events.NewMessage(pattern='/help'))
+async def help_cmd(event):
+    if event.sender_id!= ADMIN_ID:
+        return
+    await event.reply(
+        f"**Video-Only Bot**\n\n"
+        f"**Max video size:** `{MAX_FILE_SIZE/1024/1024:.0f}MB`\n"
+        f"Larger files are skipped.\n\n"
+        "**1. Add a channel pair:**\n"
+        "`/addsource -100123456789 -100987654321`\n"
+        "Copies only videos, no captions/tags.\n\n"
+        "**2. Remove a pair:**\n"
+        "`/removesource -100123456789`\n\n"
+        "**3. List all pairs:**\n"
+        "`/listmappings`\n\n"
+        "**4. Scrape old videos:**\n"
+        "`/scrape -100123456789`\n"
+        "Copies last 100 videos with 3.5s delay.\n\n"
+        "**5. Check stats:**\n"
+        "`/stats`"
+    )
+
+@client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
+    if event.sender_id!= ADMIN_ID:
+        return
     try:
         _, source, target = event.text.split()
-        MAPPINGS[source] = target
+        source_id, target_id = int(source), int(target)
+        CONFIG["sources"][str(source_id)] = str(target_id)
         await save_config()
-        await event.reply(f"Added: `{source}` → `{target}`\nSaved to Supabase.")
-    except:
-        await event.reply("Usage: `/addsource -100111 -100222`")
+        await event.reply(f"Added: `{source_id}` → `{target_id}`\nVideo-only, 200MB cap.")
+    except Exception as e:
+        await event.reply(f"Error: {e}\nUsage: /addsource -100source -100target")
 
-@client.on(events.NewMessage(pattern="/removesource"))
+@client.on(events.NewMessage(pattern='/removesource'))
 async def remove_source(event):
+    if event.sender_id!= ADMIN_ID:
+        return
     try:
         _, source = event.text.split()
-        if source in MAPPINGS:
-            del MAPPINGS[source]
-            if int(source) in LAST_IDS:
-                del LAST_IDS[int(source)]
+        source_id = str(int(source))
+        if source_id in CONFIG["sources"]:
+            del CONFIG["sources"][source_id]
             await save_config()
-            await event.reply(f"Removed: `{source}`\nSaved to Supabase.")
+            await event.reply(f"Removed `{source_id}`.")
         else:
             await event.reply("Source not found.")
-    except:
-        await event.reply("Usage: `/removesource -100111`")
+    except Exception as e:
+        await event.reply(f"Error: {e}\nUsage: /removesource -100source")
 
-@client.on(events.NewMessage(pattern="/listmappings"))
+@client.on(events.NewMessage(pattern='/listmappings'))
 async def list_mappings(event):
-    if not MAPPINGS:
-        await event.reply("No mappings set.")
+    if event.sender_id!= ADMIN_ID:
         return
-    text = "**Current mappings:**\n"
-    for s, t in MAPPINGS.items():
+    if not CONFIG["sources"]:
+        await event.reply("No mappings yet.")
+        return
+    text = "**Video mappings:**\n"
+    for s, t in CONFIG["sources"].items():
         text += f"`{s}` → `{t}`\n"
     await event.reply(text)
 
-@client.on(events.NewMessage())
-async def copy_handler(event):
-    if str(event.chat_id) not in MAPPINGS:
+@client.on(events.NewMessage(pattern='/stats'))
+async def stats(event):
+    if event.sender_id!= ADMIN_ID:
         return
+    uptime = time.time() - start_time
+    h = int(uptime // 3600)
+    m = int(uptime%3600//60)
+    mem = psutil.virtual_memory()
+    await event.reply(
+        f"**Stats**\n"
+        f"Mode: Video-only, clean reupload\n"
+        f"Max size: `{MAX_FILE_SIZE/1024/1024:.0f}MB`\n"
+        f"Uptime: `{h}h {m}m`\n"
+        f"RAM: `{mem.used/1024/1024:.1f}MB`\n"
+        f"Videos copied: `{copied_count}`\n"
+        f"Videos scraped: `{scraped_count}`\n"
+        f"Skipped >200MB: `{skipped_count}`\n"
+        f"Mappings: `{len(CONFIG['sources'])}`\n"
+        f"Scrape delay: `3.5s`"
+    )
 
-    # Skip commands
-    if event.text and event.text.startswith('/'):
+@client.on(events.NewMessage(pattern='/scrape'))
+async def scrape_history(event):
+    global scraped_count, skipped_count
+    if event.sender_id!= ADMIN_ID:
         return
-
-    target = int(MAPPINGS[str(event.chat_id)])
-
-    # Skip duplicates on restart
-    if LAST_IDS.get(event.chat_id) == event.id:
+    args = event.text.split()
+    if len(args)!= 2:
+        await event.reply("Usage: `/scrape -100source_id`")
         return
 
     try:
-        await client.send_message(target, event.message)
-        LAST_IDS[event.chat_id] = event.id
-        await save_config()
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID.")
+        return
+
+    if str(source_id) not in CONFIG["sources"]:
+        await event.reply("Source not mapped. Use `/addsource` first.")
+        return
+
+    target_id = int(CONFIG["sources"][str(source_id)])
+    await event.reply(f"Scraping videos ≤{MAX_FILE_SIZE/1024/1024:.0f}MB from `{source_id}`...\n3.5s delay, no captions.")
+
+    count = 0
+    errors = 0
+    limit = 100
+
+    try:
+        async for message in client.iter_messages(source_id, limit=limit):
+            try:
+                if message.video:
+                    if message.file.size > MAX_FILE_SIZE:
+                        skipped_count += 1
+                        continue
+
+                    await client.send_file(target_id, message.file, caption="")
+                    count += 1
+                    scraped_count += 1
+                    await asyncio.sleep(3.5)
+            except FloodWaitError as e:
+                await event.reply(f"Flood wait: sleeping {e.seconds}s")
+                await asyncio.sleep(e.seconds)
+            except Exception as e:
+                logger.error(f"Scrape failed: {e}")
+                errors += 1
+
+        await event.reply(f"Done.\nVideos copied: `{count}`\nSkipped >200MB: `{skipped_count}`\nErrors: `{errors}`")
     except Exception as e:
-        logger.error(f"Copy failed: {e}")
-        await client.send_message(LOG_CHANNEL, f"Copy failed from `{event.chat_id}`: {e}")
+        await event.reply(f"Scrape failed: {e}")
+
+async def handler(event):
+    global copied_count, skipped_count
+    source_id = event.chat_id
+    if str(source_id) in CONFIG["sources"]:
+        target_id = int(CONFIG["sources"][str(source_id)])
+        try:
+            if event.message.video:
+                if event.message.file.size > MAX_FILE_SIZE:
+                    skipped_count += 1
+                    await client.send_message(LOG_CHANNEL, f"Skipped {event.message.file.size/1024/1024:.1f}MB video from `{source_id}` - exceeds 200MB")
+                    return
+
+                await client.send_file(target_id, event.message.file, caption="")
+                copied_count += 1
+        except Exception as e:
+            error_msg = f"Copy failed from `{source_id}`: {e}"
+            logger.error(error_msg)
+            await client.send_message(LOG_CHANNEL, error_msg)
 
 async def main():
     await load_config()
+    if CONFIG["sources"]:
+        client.add_event_handler(handler, events.NewMessage(chats=list(map(int, CONFIG["sources"].keys()))))
     await client.start()
     me = await client.get_me()
-    await client.send_message(LOG_CHANNEL, f"Bot started as {me.first_name}. Supabase ready.")
-    logger.info("Bot running...")
+    logger.info(f"Video bot started as {me.first_name}")
+    await client.send_message(LOG_CHANNEL, f"Video-only bot started. 200MB cap. Clean reupload.")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
