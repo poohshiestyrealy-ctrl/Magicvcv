@@ -6,7 +6,7 @@ import time
 import psutil
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, ChatAdminRequiredError, ChannelPrivateError
 from supabase import create_client, Client
 
 # Logging
@@ -23,7 +23,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 # SETTINGS
-MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB cap you set
+MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB cap
 
 # Init
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -60,6 +60,17 @@ async def save_config():
     except Exception as e:
         logger.error(f"Failed to save to Supabase: {e}")
 
+async def check_access(chat_id):
+    try:
+        await client.get_entity(chat_id)
+        return True, None
+    except ChannelPrivateError:
+        return False, "Channel is private or you left it. Join and add your account."
+    except ValueError:
+        return False, "Invalid channel ID. Check if ID is correct."
+    except Exception as e:
+        return False, f"{e}"
+
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
     if event.sender_id!= ADMIN_ID:
@@ -86,16 +97,20 @@ async def help_cmd(event):
         f"Larger files are skipped.\n\n"
         "**1. Add a channel pair:**\n"
         "`/addsource -100123456789 -100987654321`\n"
-        "Copies only videos, no captions/tags.\n\n"
+        "You must be in both channels with posting rights.\n\n"
         "**2. Remove a pair:**\n"
         "`/removesource -100123456789`\n\n"
         "**3. List all pairs:**\n"
         "`/listmappings`\n\n"
         "**4. Scrape old videos:**\n"
         "`/scrape -100123456789`\n"
-        "Copies last 100 videos with 3.5s delay.\n\n"
+        "Copies last 100 videos ≤200MB with 3.5s delay.\n\n"
         "**5. Check stats:**\n"
-        "`/stats`"
+        "`/stats`\n\n"
+        "**Notes:**\n"
+        "- Clean reupload: no captions, no forward tags\n"
+        "- Only MP4/MKV videos sent as 'video'\n"
+        "- Uses 2x bandwidth due to reupload"
     )
 
 @client.on(events.NewMessage(pattern='/addsource'))
@@ -105,9 +120,21 @@ async def add_source(event):
     try:
         _, source, target = event.text.split()
         source_id, target_id = int(source), int(target)
+
+        # Check access to both channels before saving
+        ok_s, err_s = await check_access(source_id)
+        if not ok_s:
+            await event.reply(f"Cannot access source `{source_id}`: {err_s}")
+            return
+
+        ok_t, err_t = await check_access(target_id)
+        if not ok_t:
+            await event.reply(f"Cannot access target `{target_id}`: {err_t}")
+            return
+
         CONFIG["sources"][str(source_id)] = str(target_id)
         await save_config()
-        await event.reply(f"Added: `{source_id}` → `{target_id}`\nVideo-only, 200MB cap.")
+        await event.reply(f"Added: `{source_id}` → `{target_id}`\nVideo-only, 200MB cap. Access verified.")
     except Exception as e:
         await event.reply(f"Error: {e}\nUsage: /addsource -100source -100target")
 
@@ -181,7 +208,14 @@ async def scrape_history(event):
         return
 
     target_id = int(CONFIG["sources"][str(source_id)])
-    await event.reply(f"Scraping videos ≤{MAX_FILE_SIZE/1024/1024:.0f}MB from `{source_id}`...\n3.5s delay, no captions.")
+
+    # Verify target access before starting
+    ok, err = await check_access(target_id)
+    if not ok:
+        await event.reply(f"Cannot access target `{target_id}`: {err}")
+        return
+
+    await event.reply(f"Scraping videos ≤{MAX_FILE_SIZE/1024/1024:.0f}MB from `{source_id}`...\n3.5s delay, clean upload.")
 
     count = 0
     errors = 0
@@ -202,6 +236,9 @@ async def scrape_history(event):
             except FloodWaitError as e:
                 await event.reply(f"Flood wait: sleeping {e.seconds}s")
                 await asyncio.sleep(e.seconds)
+            except ChatAdminRequiredError:
+                await event.reply(f"Error: No posting rights in target `{target_id}`. Make your account admin.")
+                return
             except Exception as e:
                 logger.error(f"Scrape failed: {e}")
                 errors += 1
@@ -224,8 +261,20 @@ async def handler(event):
 
                 await client.send_file(target_id, event.message.file, caption="")
                 copied_count += 1
+        except ChatAdminRequiredError:
+            error_msg = f"Copy failed: No posting rights in target `{target_id}`. Make your account admin."
+            logger.error(error_msg)
+            await client.send_message(LOG_CHANNEL, error_msg)
+        except ChannelPrivateError:
+            error_msg = f"Copy failed: Target `{target_id}` is private or you left it. Rejoin the channel."
+            logger.error(error_msg)
+            await client.send_message(LOG_CHANNEL, error_msg)
+        except ValueError as e:
+            error_msg = f"Copy failed: Invalid target ID `{target_id}`. {e}"
+            logger.error(error_msg)
+            await client.send_message(LOG_CHANNEL, error_msg)
         except Exception as e:
-            error_msg = f"Copy failed from `{source_id}`: {e}"
+            error_msg = f"Copy failed from `{source_id}` to `{target_id}`: {e}"
             logger.error(error_msg)
             await client.send_message(LOG_CHANNEL, error_msg)
 
