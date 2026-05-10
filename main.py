@@ -12,7 +12,7 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 SOURCE_CHANNELS = set()
 
 async def get_pinned_msg():
-    # Correct way to get pinned message in channels
+    from telethon import types
     pinned_msgs = await client.get_messages(LOG_CHANNEL, limit=1, filter=types.InputMessagesFilterPinned)
     return pinned_msgs[0] if pinned_msgs else None
 
@@ -107,6 +107,8 @@ async def remove_handler(event):
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/list'))
 async def list_handler(event):
+    global SOURCE_CHANNELS
+    print(f"/list called. Current SOURCE_CHANNELS: {SOURCE_CHANNELS}")
     if not SOURCE_CHANNELS:
         await event.reply("No sources configured. Use `/add -100...`")
         return
@@ -131,13 +133,13 @@ async def reload_handler(event):
     await event.reply(f"Reloaded {len(SOURCE_CHANNELS)} sources. Now listening to: `{list(SOURCE_CHANNELS)}`")
 
 async def main():
-    from telethon import types # Import here to avoid circular import issues
-    global types
+    global SOURCE_CHANNELS # Critical: allows video_handler to see updates
     await client.start()
     await reload_sources()
 
     @client.on(events.NewMessage)
     async def video_handler(event):
+        global SOURCE_CHANNELS # Critical fix: use current global value, not startup value
         if event.chat_id in SOURCE_CHANNELS and event.video:
             await forward_video(event)
 
