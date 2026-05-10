@@ -13,8 +13,9 @@ API_ID = int(os.environ['API_ID'])
 API_HASH = os.environ['API_HASH']
 SESSION_STRING = os.environ['SESSION_STRING']
 LOG_CHANNEL = int(os.environ['LOG_CHANNEL'])
-ADMIN_IDS = [int(x) for x in os.environ.get('ADMIN_IDS', '').split(',') if x]
-MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', '300')) * 1024 * 1024 # 300MB default
+# Strip spaces to fix "8799097823 " bug
+ADMIN_IDS = [int(x.strip()) for x in os.environ.get('ADMIN_IDS', '').split(',') if x.strip()]
+MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', '300')) * 1024 # 300MB default
 
 # --- Client setup ---
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -34,7 +35,7 @@ VIDEOS_SKIPPED_SIZE = 0
 def admin_only(func):
     async def wrapper(event):
         if event.sender_id not in ADMIN_IDS:
-            await event.reply("You are not authorized to use this command.")
+            await event.reply(f"You are not authorized. Your ID: {event.sender_id}")
             return
         await func(event)
     return wrapper
@@ -143,7 +144,7 @@ async def forward_video(message):
 
     # Size check - 300MB limit
     if file_ref.size > MAX_VIDEO_SIZE:
-        print(f"Skipping {message.id} - too large: {file_ref.size / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
+        print(f"Skipping {message.id} - too large: {file_ref.size / 1024 / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
         await save_last_id(source_id, message.id, target_id)
         VIDEOS_SKIPPED_SIZE += 1
         return
@@ -195,12 +196,17 @@ async def forward_video(message):
         await asyncio.sleep(backoff)
 
 # --- Bot commands ---
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/debug'))
+@admin_only
+async def debug_handler(event):
+    await event.reply(f"**Debug Info**\nSender ID: `{event.sender_id}`\nAdmins loaded: `{ADMIN_IDS}`\nMatch: `{event.sender_id in ADMIN_IDS}`\nLog Channel: `{LOG_CHANNEL}`")
+
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/map'))
 @admin_only
 async def map_handler(event):
     args = event.text.split()
     if len(args) < 2:
-        await event.reply("Usage:\n/map add <source> <target>\n/map remove <source>\n/map list")
+        await event.reply("Usage:\n`/map add <source> <target>`\n`/map remove <source>`\n`/map list`")
         return
 
     cmd = args[1].lower()
@@ -215,31 +221,31 @@ async def map_handler(event):
             mappings = [m for m in mappings if m['source']!= source]
             mappings.append({"source": source, "target": target})
             if await save_config(mappings):
-                await event.reply(f"Mapped `{source}` -> `{target}`. Send /reload to apply.")
+                await event.reply(f"Mapped `{source}` -> `{target}`. Send `/reload` to apply.")
             else:
                 await event.reply("Failed to save config.")
         except:
-            await event.reply("Invalid IDs. Usage: /map add -1001111111111 -1002222222222")
+            await event.reply("Invalid IDs. Usage: `/map add -1001111111111 -1002222222222`")
 
     elif cmd == "remove" and len(args) == 3:
         try:
             source = int(args[2])
             mappings = [m for m in mappings if m['source']!= source]
             if await save_config(mappings):
-                await event.reply(f"Removed mapping for `{source}`. Send /reload to apply.")
+                await event.reply(f"Removed mapping for `{source}`. Send `/reload` to apply.")
             else:
                 await event.reply("Failed to save config.")
         except:
-            await event.reply("Invalid ID. Usage: /map remove -1001111111111")
+            await event.reply("Invalid ID. Usage: `/map remove -1001111111111`")
 
     elif cmd == "list":
         if mappings:
             text = "**Current Mappings:**\n" + "\n".join([f"`{m['source']}` -> `{m['target']}`" for m in mappings])
             await event.reply(text)
         else:
-            await event.reply("No mappings configured. Use /map add <source> <target>")
+            await event.reply("No mappings configured. Use `/map add <source> <target>`")
     else:
-        await event.reply("Usage:\n/map add <source> <target>\n/map remove <source>\n/map list")
+        await event.reply("Usage:\n`/map add <source> <target>`\n`/map remove <source>`\n`/map list`")
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/reload'))
 @admin_only
@@ -298,6 +304,7 @@ async def whoami_handler(event):
 async def help_handler(event):
     await event.reply(
         "**Commands:**\n"
+        "`/debug` - Show your ID + admin list\n"
         "`/map add <source> <target>` - Map source to target\n"
         "`/map remove <source>` - Remove mapping\n"
         "`/map list` - Show all mappings\n"
