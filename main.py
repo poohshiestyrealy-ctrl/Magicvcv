@@ -12,13 +12,9 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 SOURCE_CHANNELS = set()
 
 async def get_pinned_msg():
-    # Telethon is weird: ids=0 returns Message or TotalList or None
-    result = await client.get_messages(LOG_CHANNEL, ids=0)
-    if not result:
-        return None
-    if isinstance(result, list):
-        return result[0] if result else None
-    return result
+    # Correct way to get pinned message in channels
+    pinned_msgs = await client.get_messages(LOG_CHANNEL, limit=1, filter=types.InputMessagesFilterPinned)
+    return pinned_msgs[0] if pinned_msgs else None
 
 async def get_config():
     pinned = await get_pinned_msg()
@@ -135,6 +131,8 @@ async def reload_handler(event):
     await event.reply(f"Reloaded {len(SOURCE_CHANNELS)} sources. Now listening to: `{list(SOURCE_CHANNELS)}`")
 
 async def main():
+    from telethon import types # Import here to avoid circular import issues
+    global types
     await client.start()
     await reload_sources()
 
