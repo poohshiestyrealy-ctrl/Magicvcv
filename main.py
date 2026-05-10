@@ -1,74 +1,88 @@
 import os
 import asyncio
 import random
+import json
 from telethon import TelegramClient, events, errors
-from telethon.tl.types import PeerChannel
-from supabase import create_client, Client
+from telethon.sessions import StringSession
 
 # --- ENV VARS ---
 API_ID = int(os.environ['API_ID'])
 API_HASH = os.environ['API_HASH']
-BOT_TOKEN = os.environ['BOT_TOKEN']
-SUPABASE_URL = os.environ['SUPABASE_URL']
-SUPABASE_KEY = os.environ['SUPABASE_KEY']
+SESSION_STRING = os.environ['SESSION_STRING']
 LOG_CHANNEL = int(os.environ['LOG_CHANNEL'])
 ADMIN_IDS = [int(x) for x in os.environ.get('ADMIN_IDS', '').split(',') if x]
+MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', 200)) * 1024 * 1024  # MB to bytes
 
-# --- INIT ---
-client = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# --- INIT AS USERBOT ---
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 SOURCE_TARGET_MAP = {}
+LAST_IDS = {}
 VIDEOS_PROCESSED = 0
+CONFIG_MSG_ID = None
 
-# --- DB HELPERS ---
-async def get_last_ids():
+# --- CONFIG STORED IN PINNED MESSAGE ---
+async def load_config():
+    global SOURCE_TARGET_MAP, LAST_IDS, CONFIG_MSG_ID
     try:
-        res = supabase.table('last_ids').select('*').execute()
-        return {int(row['source_id']): int(row['last_id']) for row in res.data}
+        async for msg in client.iter_messages(LOG_CHANNEL, limit=50):
+            if msg.pinned and msg.text and msg.text.startswith('{'):
+                try:
+                    data = json.loads(msg.text)
+                    SOURCE_TARGET_MAP = {int(k): int(v) for k, v in data.get('sources', {}).items()}
+                    LAST_IDS = {int(k): int(v) for k, v in data.get('last_ids', {}).items()}
+                    CONFIG_MSG_ID = msg.id
+                    print(f"Loaded config: {len(SOURCE_TARGET_MAP)} sources")
+                    return
+                except:
+                    continue
     except Exception as e:
-        print(f"Error fetching last_ids: {e}")
-        return {}
+        print(f"Error loading config: {e}")
+    await save_config()
 
-async def save_last_id(source_id, last_id, target_id):
+async def save_config():
+    global CONFIG_MSG_ID
+    data = {
+        'sources': {str(k): str(v) for k, v in SOURCE_TARGET_MAP.items()},
+        'last_ids': {str(k): str(v) for k, v in LAST_IDS.items()}
+    }
+    text = json.dumps(data, indent=2)
     try:
-        supabase.table('last_ids').upsert({
-            'source_id': str(source_id),
-            'last_id': int(last_id),
-            'target_id': str(target_id)
-        }).execute()
+        if CONFIG_MSG_ID:
+            await client.edit_message(LOG_CHANNEL, CONFIG_MSG_ID, text)
+        else:
+            msg = await client.send_message(LOG_CHANNEL, text)
+            await client.pin_message(LOG_CHANNEL, msg.id)
+            CONFIG_MSG_ID = msg.id
     except Exception as e:
-        print(f"Error saving last_id: {e}")
-
-async def reload_sources():
-    global SOURCE_TARGET_MAP
-    try:
-        res = supabase.table('sources').select('*').execute()
-        SOURCE_TARGET_MAP = {int(row['source_id']): int(row['target_id']) for row in res.data}
-        print(f"Loaded {len(SOURCE_TARGET_MAP)} source->target mappings")
-    except Exception as e:
-        print(f"Error loading sources: {e}")
-        SOURCE_TARGET_MAP = {}
+        print(f"Error saving config: {e}")
 
 # --- DECORATORS ---
 def admin_only(func):
     async def wrapper(event):
         if event.sender_id not in ADMIN_IDS:
-            await event.reply("Unauthorized")
             return
         return await func(event)
     return wrapper
 
-# --- CORE LOGIC: RE-UPLOAD FOR CLEAN POSTS ---
+# --- CORE: RE-UPLOAD FOR CLEAN POSTS ---
 async def forward_video(message):
     source_id = message.chat_id
     if source_id not in SOURCE_TARGET_MAP:
         return
     target_id = SOURCE_TARGET_MAP[source_id]
 
-    # 45-90s delay to avoid PEER_FLOOD. Bump to 90-150 if you get banned.
+    # Skip if video > MAX_VIDEO_SIZE
+    file_size = message.video.size if message.video else message.document.size
+    if file_size > MAX_VIDEO_SIZE:
+        print(f"Skipping {message.id} - {file_size/1024/1024:.1f}MB > {MAX_VIDEO_SIZE/1024/1024}MB")
+        LAST_IDS[source_id] = message.id
+        await save_config()
+        return
+
+    # 45-90s delay to avoid PEER_FLOOD
     delay = random.randint(45, 90)
-    print(f"Safe delay: {delay}s before re-upload of {message.id} to {target_id}")
+    print(f"Delay: {delay}s before re-upload of {message.id}")
     await asyncio.sleep(delay)
 
     try:
@@ -79,10 +93,11 @@ async def forward_video(message):
         else:
             return
 
-        await save_last_id(source_id, message.id, target_id)
+        LAST_IDS[source_id] = message.id
+        await save_config()
         global VIDEOS_PROCESSED
         VIDEOS_PROCESSED += 1
-        print(f"RE-UPLOADED {message.id} from {source_id} -> {target_id}")
+        print(f"RE-UPLOADED {message.id} from {source_id} -> {target_id} | Total: {VIDEOS_PROCESSED}")
 
     except errors.FloodWaitError as e:
         print(f"FloodWait {e.seconds}s - sleeping")
@@ -92,73 +107,106 @@ async def forward_video(message):
 
 # --- PARALLEL PROCESSING ---
 async def process_source(source_id):
-    last_id = (await get_last_ids()).get(source_id, 0)
+    last_id = LAST_IDS.get(source_id, 0)
     print(f"Processing {source_id} from ID {last_id}")
     async for message in client.iter_messages(source_id, min_id=last_id, reverse=True):
         if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
             await forward_video(message)
 
 async def startup_task():
-    await reload_sources()
+    await load_config()
+    await client.send_message(LOG_CHANNEL, f"Userbot started.\n{len(SOURCE_TARGET_MAP)} sources.\nClean post mode.\nMax: {MAX_VIDEO_SIZE/1024/1024}MB")
     tasks = [process_source(source) for source in SOURCE_TARGET_MAP.keys()]
     if tasks:
         await asyncio.gather(*tasks)
-    await client.send_message(LOG_CHANNEL, f"Bot started. {len(SOURCE_TARGET_MAP)} sources loaded. Clean post mode.")
 
-# --- COMMANDS ---
-@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/start'))
+# --- COMMANDS - NON-AMBIGUOUS ---
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/start$'))
 @admin_only
 async def start_handler(event):
-    await event.reply("Bot is running. Clean post mode active.\n/start, /add, /remove, /reload, /status")
+    await event.reply("**Userbot Commands:**\n"
+                      "`/start` - Show this help\n"
+                      "`/addsource -100src -100dst` - Add mapping\n"
+                      "`/removesource -100src` - Remove mapping\n"
+                      "`/list` - Show all mappings\n"
+                      "`/reload` - Reload + restart processing\n"
+                      "`/status` - Show mappings + stats", parse_mode='md')
 
-@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/add'))
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/addsource'))
 @admin_only
 async def add_handler(event):
+    args = event.text.split()
+    if len(args) != 3:
+        await event.reply("Usage: `/addsource -100source -100target`", parse_mode='md')
+        return
     try:
-        _, source, target = event.text.split()
-        supabase.table('sources').upsert({
-            'source_id': source,
-            'target_id': target
-        }).execute()
-        await reload_sources()
-        await event.reply(f"Added {source} -> {target}")
+        source = int(args[1])
+        target = int(args[2])
+        SOURCE_TARGET_MAP[source] = target
+        await save_config()
+        await event.reply(f"Added: `{source}` -> `{target}`", parse_mode='md')
+    except ValueError:
+        await event.reply("IDs must be numbers. Ex: `/addsource -1001111111111 -1002222222222`", parse_mode='md')
     except Exception as e:
-        await event.reply(f"Usage: /add source_id target_id\nError: {e}")
+        await event.reply(f"Error: {e}")
 
-@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/remove'))
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/removesource'))
 @admin_only
 async def remove_handler(event):
+    args = event.text.split()
+    if len(args) != 2:
+        await event.reply("Usage: `/removesource -100source`", parse_mode='md')
+        return
     try:
-        _, source = event.text.split()
-        supabase.table('sources').delete().eq('source_id', source).execute()
-        await reload_sources()
-        await event.reply(f"Removed {source}")
-    except Exception as e:
-        await event.reply(f"Usage: /remove source_id\nError: {e}")
+        source = int(args[1])
+        if source in SOURCE_TARGET_MAP:
+            SOURCE_TARGET_MAP.pop(source)
+            LAST_IDS.pop(source, None)
+            await save_config()
+            await event.reply(f"Removed: `{source}`", parse_mode='md')
+        else:
+            await event.reply(f"Source `{source}` not found", parse_mode='md')
+    except ValueError:
+        await event.reply("ID must be a number. Ex: `/removesource -1001111111111`", parse_mode='md')
 
-@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/reload'))
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/list$'))
+@admin_only
+async def list_handler(event):
+    if not SOURCE_TARGET_MAP:
+        await event.reply("No sources configured. Use `/addsource -100xxx -100yyy`")
+        return
+    text = "**Active Mappings:**\n"
+    for source, target in SOURCE_TARGET_MAP.items():
+        last = LAST_IDS.get(source, 0)
+        text += f"`{source}` -> `{target}` | Last: `{last}`\n"
+    await event.reply(text, parse_mode='md')
+
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/reload$'))
 @admin_only
 async def reload_handler(event):
-    await reload_sources()
+    await load_config()
     await event.reply(f"Reloaded {len(SOURCE_TARGET_MAP)} mappings. Starting parallel processing...")
     tasks = [process_source(source) for source in SOURCE_TARGET_MAP.keys()]
     if tasks:
         await asyncio.gather(*tasks)
 
-@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/status'))
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/status$'))
 @admin_only
 async def status_handler(event):
-    last_ids = await get_last_ids()
-    status = f"**Status**\nVideos processed: {VIDEOS_PROCESSED}\n\n"
-    for source, target in SOURCE_TARGET_MAP.items():
-        last = last_ids.get(source, 0)
-        status += f"`{source}` -> `{target}` | Last: {last}\n"
-    bandwidth = VIDEOS_PROCESSED * 0.4  # 200MB*2 = 0.4GB per video
-    status += f"\nEst. bandwidth used: {bandwidth:.1f} GB"
-    await event.reply(status)
+    bandwidth = VIDEOS_PROCESSED * (MAX_VIDEO_SIZE/1024/1024/1024) * 2
+    status = f"**Status**\nVideos processed: `{VIDEOS_PROCESSED}`\nMax size: `{MAX_VIDEO_SIZE/1024/1024}MB`\nBandwidth: `{bandwidth:.1f} GB`\n\n"
+    if SOURCE_TARGET_MAP:
+        status += "**Mappings:**\n"
+        for source, target in SOURCE_TARGET_MAP.items():
+            last = LAST_IDS.get(source, 0)
+            status += f"`{source}` -> `{target}` | Last: `{last}`\n"
+    else:
+        status += "No sources configured."
+    await event.reply(status, parse_mode='md')
 
 # --- RUN ---
 async def main():
+    await client.start()
     await startup_task()
 
 with client:
