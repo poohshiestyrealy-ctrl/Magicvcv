@@ -13,9 +13,8 @@ API_ID = int(os.environ['API_ID'])
 API_HASH = os.environ['API_HASH']
 SESSION_STRING = os.environ['SESSION_STRING']
 LOG_CHANNEL = int(os.environ['LOG_CHANNEL'])
-# Strip spaces to fix "8799097823 " bug
 ADMIN_IDS = [int(x.strip()) for x in os.environ.get('ADMIN_IDS', '').split(',') if x.strip()]
-MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', '300')) * 1024 * 1024 # 300MB default - FIXED
+MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', '300')) * 1024 * 1024 # 300MB default
 
 # --- Client setup ---
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -48,30 +47,42 @@ async def find_or_create_config():
             if msg and msg.text and msg.text.startswith('{"mappings":') and msg.pinned:
                 CONFIG_MSG_ID = msg.id
                 print(f"Found existing config at message ID {CONFIG_MSG_ID}")
-                return
+                return True
     except Exception as e:
         print(f"Error searching for config: {e}")
     print("CRITICAL: No pinned config found. Pin a message with {\"mappings\": []} first.")
     CONFIG_MSG_ID = None
+    return False
 
 async def load_config():
     global SOURCE_TARGET_MAP
-    if not CONFIG_MSG_ID: await find_or_create_config()
-    if not CONFIG_MSG_ID: return {}
+    if not CONFIG_MSG_ID:
+        if not await find_or_create_config():
+            return {}
     try:
-        msg = await client.get_messages(LOG_CHANNEL, ids=CONFIG_MSG_ID)
+        # FIX: get_messages returns a list, grab [0]
+        messages = await client.get_messages(LOG_CHANNEL, ids=CONFIG_MSG_ID)
+        if not messages:
+            CONFIG_MSG_ID = None
+            return {}
+        msg = messages[0] if isinstance(messages, list) else messages
+        if not msg or not msg.text:
+            CONFIG_MSG_ID = None
+            return {}
         data = json.loads(msg.text)
         mappings = data.get('mappings', [])
         SOURCE_TARGET_MAP = {m['source']: m['target'] for m in mappings}
         return SOURCE_TARGET_MAP
     except Exception as e:
         print(f"Failed to load config: {e}")
+        CONFIG_MSG_ID = None
         return {}
 
 async def save_config(mappings_list):
     global CONFIG_MSG_ID
-    if not CONFIG_MSG_ID: await find_or_create_config()
-    if not CONFIG_MSG_ID: return False
+    if not CONFIG_MSG_ID:
+        if not await find_or_create_config():
+            return False
     try:
         await client.edit_message(LOG_CHANNEL, CONFIG_MSG_ID, json.dumps({'mappings': mappings_list}))
         return True
@@ -142,15 +153,15 @@ async def forward_video(message):
     if not file_ref:
         return
 
-    # Size check - now correctly in MB
+    # Size check
     if file_ref.size > MAX_VIDEO_SIZE:
-        print(f"Skipping {message.id} - too large: {file_ref.size / 1024 / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024:.0f} MB")
+        print(f"Skipping {message.id} - too large: {file_ref.size / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
         await save_last_id(source_id, message.id, target_id)
         VIDEOS_SKIPPED_SIZE += 1
         return
 
     try:
-        # Save checkpoint BEFORE doing anything slow. Prevents dupes on crash/restart
+        # Save checkpoint BEFORE doing anything slow
         await save_last_id(source_id, message.id, target_id)
 
         await global_rate_limit()
@@ -167,7 +178,7 @@ async def forward_video(message):
             return
 
         UPLOAD_TIMESTAMPS.append(time.time())
-        TOTAL_BANDWIDTH_USED += file_ref.size # Only upload, no download
+        TOTAL_BANDWIDTH_USED += file_ref.size
         VIDEOS_PROCESSED += 1
         print(f"RE-UPLOADED {message.id} from {source_id} -> {target_id}")
         ERROR_COUNT = 0
@@ -199,7 +210,7 @@ async def forward_video(message):
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/debug'))
 @admin_only
 async def debug_handler(event):
-    await event.reply(f"**Debug Info**\nSender ID: `{event.sender_id}`\nAdmins loaded: `{ADMIN_IDS}`\nMatch: `{event.sender_id in ADMIN_IDS}`\nLog Channel: `{LOG_CHANNEL}`")
+    await event.reply(f"**Debug Info**\nSender ID: `{event.sender_id}`\nAdmins loaded: `{ADMIN_IDS}`\nMatch: `{event.sender_id in ADMIN_IDS}`\nLog Channel: `{LOG_CHANNEL}`\nConfig ID: `{CONFIG_MSG_ID}`")
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/map'))
 @admin_only
@@ -211,7 +222,18 @@ async def map_handler(event):
 
     cmd = args[1].lower()
     await load_config()
-    msg = await client.get_messages(LOG_CHANNEL, ids=CONFIG_MSG_ID)
+    
+    # FIX: Check if config exists before trying to read it
+    if not CONFIG_MSG_ID:
+        await event.reply("CRITICAL: No pinned config found. Pin a message with `{\"mappings\": []}` first.")
+        return
+        
+    messages = await client.get_messages(LOG_CHANNEL, ids=CONFIG_MSG_ID)
+    if not messages:
+        await event.reply("CRITICAL: Config message not found. Re-pin the config.")
+        return
+        
+    msg = messages[0] if isinstance(messages, list) else messages
     data = json.loads(msg.text)
     mappings = data.get('mappings', [])
 
@@ -329,7 +351,7 @@ async def main():
     me = await client.get_me()
     print(f"Logged in as: {me.username or me.first_name}")
     print(f"Admins: {ADMIN_IDS}")
-    print(f"Max video size: {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB") # Now shows correct MB
+    print(f"Max video size: {MAX_VIDEO_SIZE / 1024:.0f} MB")
     await find_or_create_config()
     await reload_sources()
     print(f"Bot started. Mappings: {SOURCE_TARGET_MAP}")
