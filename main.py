@@ -1,6 +1,6 @@
 from telethon.sync import TelegramClient, events
 from telethon.sessions import StringSession
-import asyncio, random, os, re
+import asyncio, random, os
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
@@ -12,7 +12,6 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 SOURCE_CHANNELS = set()
 
 async def get_config():
-    # Read pinned message in LOG_CHANNEL for source list
     pinned = await client.get_messages(LOG_CHANNEL, ids=0)
     if not pinned or not pinned[0]:
         return set()
@@ -28,7 +27,6 @@ async def get_config():
     return sources
 
 async def update_pinned_config(sources):
-    # Update or create pinned message with current sources
     content = "# Bot Config - Auto managed\n# Use /add -100... or /remove -100...\n\n"
     content += "\n".join(str(s) for s in sorted(sources))
 
@@ -76,7 +74,6 @@ async def reload_sources():
     print(f"Config reloaded. Sources: {SOURCE_CHANNELS}")
     return SOURCE_CHANNELS
 
-# Command handlers in LOG_CHANNEL only
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'/add (-100\d+)'))
 async def add_handler(event):
     global SOURCE_CHANNELS
@@ -87,7 +84,7 @@ async def add_handler(event):
 
     SOURCE_CHANNELS.add(new_id)
     await update_pinned_config(SOURCE_CHANNELS)
-    await event.reply(f"Added `{new_id}`. Restart bot to start mirroring.")
+    await event.reply(f"Added `{new_id}`. Run `/reload` or restart bot to start mirroring.")
     await reload_sources()
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'/remove (-100\d+)'))
@@ -100,7 +97,7 @@ async def remove_handler(event):
 
     SOURCE_CHANNELS.remove(rem_id)
     await update_pinned_config(SOURCE_CHANNELS)
-    await event.reply(f"Removed `{rem_id}`. Restart bot to stop mirroring.")
+    await event.reply(f"Removed `{rem_id}`. Run `/reload` or restart bot to stop mirroring.")
     await reload_sources()
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/list'))
@@ -120,7 +117,7 @@ async def help_handler(event):
         "`/list` - Show all sources\n"
         "`/reload` - Reload config without restart\n"
         "`/help` - This message\n\n"
-        "**Note:** After `/add` or `/remove`, restart the bot to apply changes to mirroring."
+        "**Note:** After `/add` or `/remove`, run `/reload` or restart bot to apply changes."
     )
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/reload'))
@@ -132,7 +129,6 @@ async def main():
     await client.start()
     await reload_sources()
 
-    # Video mirroring handler - uses global SOURCE_CHANNELS
     @client.on(events.NewMessage)
     async def video_handler(event):
         if event.chat_id in SOURCE_CHANNELS and event.video:
