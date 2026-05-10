@@ -11,9 +11,18 @@ LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL"))
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 SOURCE_CHANNELS = set()
 
+async def get_pinned_msg():
+    # Telethon is weird: ids=0 returns Message or TotalList or None
+    result = await client.get_messages(LOG_CHANNEL, ids=0)
+    if not result:
+        return None
+    if isinstance(result, list):
+        return result[0] if result else None
+    return result
+
 async def get_config():
-    pinned = await client.get_messages(LOG_CHANNEL, ids=0)
-    if not pinned:
+    pinned = await get_pinned_msg()
+    if not pinned or not pinned.message:
         return set()
 
     sources = set()
@@ -30,7 +39,7 @@ async def update_pinned_config(sources):
     content = "# Bot Config - Auto managed\n# Use /add -100... or /remove -100...\n\n"
     content += "\n".join(str(s) for s in sorted(sources))
 
-    pinned = await client.get_messages(LOG_CHANNEL, ids=0)
+    pinned = await get_pinned_msg()
     if pinned:
         await client.edit_message(LOG_CHANNEL, pinned.id, content)
     else:
@@ -84,7 +93,7 @@ async def add_handler(event):
 
     SOURCE_CHANNELS.add(new_id)
     await update_pinned_config(SOURCE_CHANNELS)
-    await event.reply(f"Added `{new_id}`. Run `/reload` or restart bot to start mirroring.")
+    await event.reply(f"Added `{new_id}`. Run `/reload` to start mirroring.")
     await reload_sources()
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'/remove (-100\d+)'))
@@ -97,7 +106,7 @@ async def remove_handler(event):
 
     SOURCE_CHANNELS.remove(rem_id)
     await update_pinned_config(SOURCE_CHANNELS)
-    await event.reply(f"Removed `{rem_id}`. Run `/reload` or restart bot to stop mirroring.")
+    await event.reply(f"Removed `{rem_id}`. Run `/reload` to stop mirroring.")
     await reload_sources()
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/list'))
