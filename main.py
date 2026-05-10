@@ -1,6 +1,6 @@
 from telethon.sync import TelegramClient, events
 from telethon.sessions import StringSession
-import asyncio, random, os
+import asyncio, random, os, re
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
@@ -9,23 +9,35 @@ TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL"))
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+SOURCE_CHANNELS = set()
 
 async def get_config():
+    # Read pinned message in LOG_CHANNEL for source list
     pinned = await client.get_messages(LOG_CHANNEL, ids=0)
     if not pinned or not pinned[0]:
-        raise ValueError("Pin a message in LOG_CHANNEL with source channel IDs, one per line")
+        return set()
 
-    sources = []
+    sources = set()
     for line in pinned[0].message.split("\n"):
         line = line.strip()
         if line and not line.startswith("#") and line.startswith("-100"):
             try:
-                sources.append(int(line.split()[0]))
+                sources.add(int(line.split()[0]))
             except:
-                print(f"Bad line in config: {line}")
-    if not sources:
-        raise ValueError("No valid source channels found in pinned message")
+                pass
     return sources
+
+async def update_pinned_config(sources):
+    # Update or create pinned message with current sources
+    content = "# Bot Config - Auto managed\n# Use /add -100... or /remove -100...\n\n"
+    content += "\n".join(str(s) for s in sorted(sources))
+
+    pinned = await client.get_messages(LOG_CHANNEL, ids=0)
+    if pinned and pinned[0]:
+        await client.edit_message(LOG_CHANNEL, pinned[0].id, content)
+    else:
+        msg = await client.send_message(LOG_CHANNEL, content)
+        await client.pin_message(LOG_CHANNEL, msg.id)
 
 async def get_last_ids():
     try:
@@ -58,14 +70,72 @@ async def forward_video(message):
             print(f"FloodWait: sleeping {wait_time}s")
             await asyncio.sleep(wait_time)
 
+async def reload_sources():
+    global SOURCE_CHANNELS
+    SOURCE_CHANNELS = await get_config()
+    print(f"Config reloaded. Sources: {SOURCE_CHANNELS}")
+    return SOURCE_CHANNELS
+
+# Command handlers in LOG_CHANNEL only
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'/add (-100\d+)'))
+async def add_handler(event):
+    global SOURCE_CHANNELS
+    new_id = int(event.pattern_match.group(1))
+    if new_id in SOURCE_CHANNELS:
+        await event.reply(f"Already added: `{new_id}`")
+        return
+
+    SOURCE_CHANNELS.add(new_id)
+    await update_pinned_config(SOURCE_CHANNELS)
+    await event.reply(f"Added `{new_id}`. Restart bot to start mirroring.")
+    await reload_sources()
+
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'/remove (-100\d+)'))
+async def remove_handler(event):
+    global SOURCE_CHANNELS
+    rem_id = int(event.pattern_match.group(1))
+    if rem_id not in SOURCE_CHANNELS:
+        await event.reply(f"Not in list: `{rem_id}`")
+        return
+
+    SOURCE_CHANNELS.remove(rem_id)
+    await update_pinned_config(SOURCE_CHANNELS)
+    await event.reply(f"Removed `{rem_id}`. Restart bot to stop mirroring.")
+    await reload_sources()
+
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/list'))
+async def list_handler(event):
+    if not SOURCE_CHANNELS:
+        await event.reply("No sources configured. Use `/add -100...`")
+        return
+    text = "**Active sources:**\n" + "\n".join(f"`{s}`" for s in sorted(SOURCE_CHANNELS))
+    await event.reply(text)
+
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/help'))
+async def help_handler(event):
+    await event.reply(
+        "**Bot Commands:**\n"
+        "`/add -100123456789` - Add source channel\n"
+        "`/remove -100123456789` - Remove source\n"
+        "`/list` - Show all sources\n"
+        "`/reload` - Reload config without restart\n"
+        "`/help` - This message\n\n"
+        "**Note:** After `/add` or `/remove`, restart the bot to apply changes to mirroring."
+    )
+
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/reload'))
+async def reload_handler(event):
+    await reload_sources()
+    await event.reply(f"Reloaded {len(SOURCE_CHANNELS)} sources. Now listening to: `{list(SOURCE_CHANNELS)}`")
+
 async def main():
     await client.start()
-    SOURCE_CHANNELS = await get_config()
-    print(f"Loaded {len(SOURCE_CHANNELS)} sources: {SOURCE_CHANNELS}")
+    await reload_sources()
 
-    @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
-    async def handler(event):
-        if event.video:
+    # Video mirroring handler - uses global SOURCE_CHANNELS
+    @client.on(events.NewMessage)
+    async def video_handler(event):
+        if event.chat_id in SOURCE_CHANNELS and event.video:
             await forward_video(event)
 
     last_ids = await get_last_ids()
@@ -81,7 +151,7 @@ async def main():
         for message in reversed(messages):
             await forward_video(message)
 
-    print("Done with old videos. Mirroring new videos from all sources")
+    print("Bot ready. Send /help in LOG_CHANNEL for commands")
     await client.run_until_disconnected()
 
 client.loop.run_until_complete(main())
