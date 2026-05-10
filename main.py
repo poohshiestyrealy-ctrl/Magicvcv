@@ -15,14 +15,14 @@ SESSION_STRING = os.environ['SESSION_STRING']
 
 TARGET_CHANNEL = int(os.environ['TARGET_CHANNEL'])
 LOG_CHANNEL = int(os.environ['LOG_CHANNEL'])
-CONFIG_MSG_ID = 2 # Change this to your pinned config message ID in Botlogs
+CONFIG_MSG_ID = 2 # Change this to your pinned config message ID
 
-# --- Client setup: USERBOT MODE WITH STRING SESSION ---
+# --- Client setup ---
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 # --- Global state ---
 SOURCE_CHANNELS = set()
-UPLOAD_TIMESTAMPS = deque(maxlen=20) # For 20 uploads/hour rate limit
+UPLOAD_TIMESTAMPS = deque(maxlen=20)
 LAST_ERROR_TIME = 0
 ERROR_COUNT = 0
 
@@ -30,6 +30,9 @@ ERROR_COUNT = 0
 async def load_config():
     try:
         msg = await client.get_messages(LOG_CHANNEL, ids=CONFIG_MSG_ID)
+        if not msg or not msg.text: # Fix: handle None message
+            print("Config message not found. Create pinned message with {\"sources\": []}")
+            return set()
         data = json.loads(msg.text)
         return set(data.get('sources', []))
     except Exception as e:
@@ -38,7 +41,10 @@ async def load_config():
 
 async def save_config(sources):
     data = json.dumps({'sources': list(sources)})
-    await client.edit_message(LOG_CHANNEL, CONFIG_MSG_ID, data)
+    try:
+        await client.edit_message(LOG_CHANNEL, CONFIG_MSG_ID, data)
+    except Exception as e:
+        print(f"Failed to save config: {e}")
 
 async def reload_sources():
     global SOURCE_CHANNELS
@@ -48,8 +54,9 @@ async def reload_sources():
 # --- Dupe tracking via Botlogs ---
 async def get_last_ids():
     last_ids = {}
-    async for msg in client.iter_messages(LOG_CHANNEL, search=':'):
-        if msg.text and ':' in msg.text:
+    # Fix: Removed search=':' because it causes SearchQueryEmptyError
+    async for msg in client.iter_messages(LOG_CHANNEL, limit=500):
+        if msg.text and ':' in msg.text and not msg.text.startswith('/'):
             try:
                 sid, mid = msg.text.split(':')
                 sid, mid = int(sid), int(mid)
@@ -97,13 +104,11 @@ async def forward_video(message):
         protected = await is_protected(source_id)
 
         if protected:
-            # Protected channel = native forward, keeps "Forwarded from" tag
             await client.forward_messages(TARGET_CHANNEL, message)
             print(f"FORWARDED {message.id} from {source_id} - protected")
         else:
-            # Unprotected = re-upload clean with delays
             await global_rate_limit()
-            delay = random.randint(180, 300) # 3-5 min delay
+            delay = random.randint(180, 300)
             print(f"Safe delay: {delay}s before re-upload")
             await asyncio.sleep(delay)
 
@@ -112,7 +117,7 @@ async def forward_video(message):
             print(f"RE-UPLOADED {message.id} from {source_id} - clean")
 
         await save_last_id(source_id, message.id)
-        ERROR_COUNT = 0 # Reset on success
+        ERROR_COUNT = 0
 
     except FloodWaitError as e:
         LAST_ERROR_TIME = time.time()
@@ -135,7 +140,7 @@ async def forward_video(message):
         print(f"Error {message.id}: {e}. Backoff {backoff}s")
         await asyncio.sleep(backoff)
 
-# --- Bot commands in Botlogs ---
+# --- Bot commands ---
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/add'))
 async def add_handler(event):
     try:
@@ -171,18 +176,14 @@ async def reload_handler(event):
     await reload_sources()
     await event.reply(f"Reloaded {len(SOURCE_CHANNELS)} sources: `{list(SOURCE_CHANNELS)}`")
 
-    # Scan old videos after reload
     last_ids = await get_last_ids()
-    print(f"Rescanning after /reload. Resuming from: {last_ids}")
-
     for source in SOURCE_CHANNELS:
         last_id = last_ids.get(source, 0)
-        print(f"Checking {source} from ID {last_id}")
         messages = []
         async for message in client.iter_messages(source, min_id=last_id):
-            if message.video or (message.document and message.document.mime_type.startswith('video')):
+            if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
                 messages.append(message)
-        for message in reversed(messages): # Oldest first
+        for message in reversed(messages):
             await forward_video(message)
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/help'))
@@ -199,7 +200,7 @@ async def help_handler(event):
 # --- Live mirroring ---
 @client.on(events.NewMessage())
 async def video_handler(event):
-    if event.chat_id in SOURCE_CHANNELS and (event.video or (event.document and event.document.mime_type.startswith('video'))):
+    if event.chat_id in SOURCE_CHANNELS and (event.video or (event.document and event.document.mime_type and event.document.mime_type.startswith('video'))):
         await forward_video(event)
 
 # --- Startup ---
@@ -211,16 +212,12 @@ async def main():
     await reload_sources()
     print(f"Bot started. Listening to: {SOURCE_CHANNELS}")
 
-    # Initial scan for old videos
     last_ids = await get_last_ids()
-    print(f"Startup scan. Resuming from: {last_ids}")
-
     for source in SOURCE_CHANNELS:
         last_id = last_ids.get(source, 0)
-        print(f"Checking {source} from ID {last_id}")
         messages = []
         async for message in client.iter_messages(source, min_id=last_id):
-            if message.video or (message.document and message.document.mime_type.startswith('video')):
+            if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
                 messages.append(message)
         for message in reversed(messages):
             await forward_video(message)
