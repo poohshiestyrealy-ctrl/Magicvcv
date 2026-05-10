@@ -7,7 +7,6 @@ from collections import deque
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, PeerFloodError, ChatWriteForbiddenError, MessageIdInvalidError
-from telethon.tl.functions.messages import GetDiscussionMessageRequest
 
 # --- CONFIG: Reads from Railway Variables ---
 API_ID = int(os.environ['API_ID'])
@@ -29,15 +28,16 @@ CONFIG_MSG_ID = None # Will be found/created automatically
 
 # --- Config helpers ---
 async def find_or_create_config():
-    global CONFIG_MSG_ID
+    global CONFIG_MSG_ID # Fixed: declare global first
     # 1. Try to find existing config in pinned messages
     try:
         async for msg in client.iter_messages(LOG_CHANNEL, filter=client.pinned):
-            if msg.text and msg.text.startswith('{"sources":'):
+            if msg and msg.text and msg.text.startswith('{"sources":'):
                 CONFIG_MSG_ID = msg.id
                 print(f"Found config at message ID {CONFIG_MSG_ID}")
                 return
-    except: pass
+    except Exception as e:
+        print(f"Error searching pinned: {e}")
 
     # 2. If not found, create new pinned message
     try:
@@ -50,7 +50,7 @@ async def find_or_create_config():
         CONFIG_MSG_ID = None
 
 async def load_config():
-    global CONFIG_MSG_ID
+    global CONFIG_MSG_ID # Fixed: declare global first
     if not CONFIG_MSG_ID:
         await find_or_create_config()
     if not CONFIG_MSG_ID:
@@ -66,6 +66,7 @@ async def load_config():
         return set()
 
 async def save_config(sources):
+    global CONFIG_MSG_ID # Fixed: declare global first
     if not CONFIG_MSG_ID:
         await find_or_create_config()
     if not CONFIG_MSG_ID:
@@ -76,7 +77,6 @@ async def save_config(sources):
         await client.edit_message(LOG_CHANNEL, CONFIG_MSG_ID, data)
     except MessageIdInvalidError:
         print("Config message deleted. Recreating...")
-        global CONFIG_MSG_ID
         CONFIG_MSG_ID = None
         await find_or_create_config()
         await save_config(sources) # Retry
@@ -237,7 +237,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     print(f"Logged in as: {me.username or me.first_name}")
-    await find_or_create_config() # Creates config if missing
+    await find_or_create_config()
     await reload_sources()
     print(f"Bot started. Listening to: {SOURCE_CHANNELS}")
     last_ids = await get_last_ids()
