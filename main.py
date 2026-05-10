@@ -24,22 +24,20 @@ SOURCE_CHANNELS = set()
 UPLOAD_TIMESTAMPS = deque(maxlen=20)
 LAST_ERROR_TIME = 0
 ERROR_COUNT = 0
-CONFIG_MSG_ID = None # Will be found/created automatically
+CONFIG_MSG_ID = None
 
 # --- Config helpers ---
 async def find_or_create_config():
-    global CONFIG_MSG_ID # Fixed: declare global first
-    # 1. Try to find existing config in pinned messages
+    global CONFIG_MSG_ID
     try:
-        async for msg in client.iter_messages(LOG_CHANNEL, filter=client.pinned):
-            if msg and msg.text and msg.text.startswith('{"sources":'):
+        async for msg in client.iter_messages(LOG_CHANNEL, limit=20):
+            if msg and msg.text and msg.text.startswith('{"sources":') and msg.pinned:
                 CONFIG_MSG_ID = msg.id
                 print(f"Found config at message ID {CONFIG_MSG_ID}")
                 return
     except Exception as e:
-        print(f"Error searching pinned: {e}")
+        print(f"Error searching messages: {e}")
 
-    # 2. If not found, create new pinned message
     try:
         msg = await client.send_message(LOG_CHANNEL, '{"sources": []}')
         await client.pin_message(LOG_CHANNEL, msg.id, notify=False)
@@ -50,7 +48,7 @@ async def find_or_create_config():
         CONFIG_MSG_ID = None
 
 async def load_config():
-    global CONFIG_MSG_ID # Fixed: declare global first
+    global CONFIG_MSG_ID
     if not CONFIG_MSG_ID:
         await find_or_create_config()
     if not CONFIG_MSG_ID:
@@ -66,7 +64,7 @@ async def load_config():
         return set()
 
 async def save_config(sources):
-    global CONFIG_MSG_ID # Fixed: declare global first
+    global CONFIG_MSG_ID
     if not CONFIG_MSG_ID:
         await find_or_create_config()
     if not CONFIG_MSG_ID:
@@ -79,7 +77,7 @@ async def save_config(sources):
         print("Config message deleted. Recreating...")
         CONFIG_MSG_ID = None
         await find_or_create_config()
-        await save_config(sources) # Retry
+        await save_config(sources)
     except Exception as e:
         print(f"Failed to save config: {e}")
 
@@ -208,12 +206,27 @@ async def reload_handler(event):
     last_ids = await get_last_ids()
     for source in SOURCE_CHANNELS:
         last_id = last_ids.get(source, 0)
+        print(f"Checking {source} from ID {last_id}")
         messages = []
         async for message in client.iter_messages(source, min_id=last_id):
             if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
                 messages.append(message)
         for message in reversed(messages):
             await forward_video(message)
+
+@client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/scan'))
+async def scan_handler(event):
+    await event.reply("Starting full rescan of all sources. This ignores history and re-downloads everything.")
+    sources = await load_config()
+    for source in sources:
+        await event.reply(f"Scanning {source}...")
+        count = 0
+        async for message in client.iter_messages(source, reverse=True):
+            if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
+                await forward_video(message)
+                count += 1
+        await event.reply(f"Finished {source}. Processed {count} videos.")
+    await event.reply("Full rescan complete.")
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/help'))
 async def help_handler(event):
@@ -222,7 +235,8 @@ async def help_handler(event):
         "`/add -100...` - Add source channel\n"
         "`/remove -100...` - Remove source\n"
         "`/list` - Show active sources\n"
-        "`/reload` - Apply changes + scan old videos\n"
+        "`/reload` - Apply changes + scan new videos\n"
+        "`/scan` - Force rescan ALL videos from start\n"
         "`/help` - This message"
     )
 
@@ -243,6 +257,7 @@ async def main():
     last_ids = await get_last_ids()
     for source in SOURCE_CHANNELS:
         last_id = last_ids.get(source, 0)
+        print(f"Checking {source} from ID {last_id}")
         messages = []
         async for message in client.iter_messages(source, min_id=last_id):
             if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
