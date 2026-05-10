@@ -55,12 +55,11 @@ async def find_or_create_config():
     return False
 
 async def load_config():
-    global SOURCE_TARGET_MAP
+    global SOURCE_TARGET_MAP, CONFIG_MSG_ID # FIX: added global
     if not CONFIG_MSG_ID:
         if not await find_or_create_config():
             return {}
     try:
-        # FIX: get_messages returns a list, grab [0]
         messages = await client.get_messages(LOG_CHANNEL, ids=CONFIG_MSG_ID)
         if not messages:
             CONFIG_MSG_ID = None
@@ -79,7 +78,7 @@ async def load_config():
         return {}
 
 async def save_config(mappings_list):
-    global CONFIG_MSG_ID
+    global CONFIG_MSG_ID # FIX: added global
     if not CONFIG_MSG_ID:
         if not await find_or_create_config():
             return False
@@ -155,7 +154,7 @@ async def forward_video(message):
 
     # Size check
     if file_ref.size > MAX_VIDEO_SIZE:
-        print(f"Skipping {message.id} - too large: {file_ref.size / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
+        print(f"Skipping {message.id} - too large: {file_ref.size / 1024 / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
         await save_last_id(source_id, message.id, target_id)
         VIDEOS_SKIPPED_SIZE += 1
         return
@@ -223,7 +222,6 @@ async def map_handler(event):
     cmd = args[1].lower()
     await load_config()
     
-    # FIX: Check if config exists before trying to read it
     if not CONFIG_MSG_ID:
         await event.reply("CRITICAL: No pinned config found. Pin a message with `{\"mappings\": []}` first.")
         return
@@ -351,7 +349,7 @@ async def main():
     me = await client.get_me()
     print(f"Logged in as: {me.username or me.first_name}")
     print(f"Admins: {ADMIN_IDS}")
-    print(f"Max video size: {MAX_VIDEO_SIZE / 1024:.0f} MB")
+    print(f"Max video size: {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB") # Fixed
     await find_or_create_config()
     await reload_sources()
     print(f"Bot started. Mappings: {SOURCE_TARGET_MAP}")
