@@ -11,15 +11,16 @@ API_HASH = os.environ['API_HASH']
 SESSION_STRING = os.environ['SESSION_STRING']
 LOG_CHANNEL = int(os.environ['LOG_CHANNEL'])
 ADMIN_IDS = [int(x) for x in os.environ.get('ADMIN_IDS', '').split(',') if x]
-MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', 200)) * 1024 * 1024  # MB to bytes
+MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', 300)) * 1024 * 1024
 
-# --- INIT AS USERBOT ---
+# --- INIT ---
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 SOURCE_TARGET_MAP = {}
 LAST_IDS = {}
 VIDEOS_PROCESSED = 0
 CONFIG_MSG_ID = None
+RUNNING_TASKS = {}
 
 # --- CONFIG STORED IN PINNED MESSAGE ---
 async def load_config():
@@ -47,6 +48,7 @@ async def save_config():
         'last_ids': {str(k): str(v) for k, v in LAST_IDS.items()}
     }
     text = json.dumps(data, indent=2)
+    text += f"\n\nMax video size: {MAX_VIDEO_SIZE/1024/1024:.0f} MB\nActive mappings: {len(SOURCE_TARGET_MAP)}"
     try:
         if CONFIG_MSG_ID:
             await client.edit_message(LOG_CHANNEL, CONFIG_MSG_ID, text)
@@ -72,15 +74,11 @@ async def forward_video(message):
         return
     target_id = SOURCE_TARGET_MAP[source_id]
 
-    # Skip if video > MAX_VIDEO_SIZE
     file_size = message.video.size if message.video else message.document.size
     if file_size > MAX_VIDEO_SIZE:
         print(f"Skipping {message.id} - {file_size/1024/1024:.1f}MB > {MAX_VIDEO_SIZE/1024/1024}MB")
-        LAST_IDS[source_id] = message.id
-        await save_config()
         return
 
-    # 45-90s delay to avoid PEER_FLOOD
     delay = random.randint(45, 90)
     print(f"Delay: {delay}s before re-upload of {message.id}")
     await asyncio.sleep(delay)
@@ -93,8 +91,6 @@ async def forward_video(message):
         else:
             return
 
-        LAST_IDS[source_id] = message.id
-        await save_config()
         global VIDEOS_PROCESSED
         VIDEOS_PROCESSED += 1
         print(f"RE-UPLOADED {message.id} from {source_id} -> {target_id} | Total: {VIDEOS_PROCESSED}")
@@ -102,30 +98,60 @@ async def forward_video(message):
     except errors.FloodWaitError as e:
         print(f"FloodWait {e.seconds}s - sleeping")
         await asyncio.sleep(e.seconds)
+    except errors.PeerFloodError:
+        print("PEER_FLOOD hit - stopping this source for 24h")
+        if source_id in RUNNING_TASKS:
+            RUNNING_TASKS[source_id].cancel()
     except Exception as e:
         print(f"Error re-uploading {message.id}: {e}")
 
-# --- PARALLEL PROCESSING ---
+# --- PARALLEL PROCESSING WITH DEDUPE ---
 async def process_source(source_id):
     last_id = LAST_IDS.get(source_id, 0)
     print(f"Processing {source_id} from ID {last_id}")
-    async for message in client.iter_messages(source_id, min_id=last_id, reverse=True):
-        if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
-            await forward_video(message)
+    processed_in_session = set()
+    
+    try:
+        async for message in client.iter_messages(source_id, min_id=last_id, reverse=True, limit=None):
+            if message.id in processed_in_session or message.id <= LAST_IDS.get(source_id, 0):
+                continue
+                
+            if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
+                processed_in_session.add(message.id)
+                await forward_video(message)
+                LAST_IDS[source_id] = message.id
+                await save_config()
+                
+    except asyncio.CancelledError:
+        print(f"Stopped processing {source_id}")
+    except Exception as e:
+        print(f"Error processing {source_id}: {e}")
+
+async def start_processing(source_id):
+    if source_id in RUNNING_TASKS:
+        print(f"Cancelling old task for {source_id}")
+        RUNNING_TASKS[source_id].cancel()
+        try:
+            await RUNNING_TASKS[source_id]
+        except asyncio.CancelledError:
+            pass
+    
+    task = asyncio.create_task(process_source(source_id))
+    RUNNING_TASKS[source_id] = task
+    print(f"Started new task for {source_id}")
 
 async def startup_task():
     await load_config()
     await client.send_message(LOG_CHANNEL, f"Userbot started.\n{len(SOURCE_TARGET_MAP)} sources.\nClean post mode.\nMax: {MAX_VIDEO_SIZE/1024/1024}MB")
-    tasks = [process_source(source) for source in SOURCE_TARGET_MAP.keys()]
-    if tasks:
-        await asyncio.gather(*tasks)
+    for source in SOURCE_TARGET_MAP.keys():
+        await start_processing(source)
 
-# --- COMMANDS - NON-AMBIGUOUS ---
+# --- COMMANDS ---
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/start$'))
 @admin_only
 async def start_handler(event):
-    await event.reply("**Userbot Commands:**\n"
-                      "`/start` - Show this help\n"
+    await event.reply("**Commands:**\n"
+                      "`/start` - Show help\n"
                       "`/addsource -100src -100dst` - Add mapping\n"
                       "`/removesource -100src` - Remove mapping\n"
                       "`/list` - Show all mappings\n"
@@ -134,7 +160,7 @@ async def start_handler(event):
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/addsource'))
 @admin_only
-async def add_handler(event):
+async def addsource_handler(event):
     args = event.text.split()
     if len(args) != 3:
         await event.reply("Usage: `/addsource -100source -100target`", parse_mode='md')
@@ -143,16 +169,17 @@ async def add_handler(event):
         source = int(args[1])
         target = int(args[2])
         SOURCE_TARGET_MAP[source] = target
+        if source not in LAST_IDS:
+            LAST_IDS[source] = 0
         await save_config()
         await event.reply(f"Added: `{source}` -> `{target}`", parse_mode='md')
+        await start_processing(source)
     except ValueError:
         await event.reply("IDs must be numbers. Ex: `/addsource -1001111111111 -1002222222222`", parse_mode='md')
-    except Exception as e:
-        await event.reply(f"Error: {e}")
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/removesource'))
 @admin_only
-async def remove_handler(event):
+async def removesource_handler(event):
     args = event.text.split()
     if len(args) != 2:
         await event.reply("Usage: `/removesource -100source`", parse_mode='md')
@@ -160,6 +187,9 @@ async def remove_handler(event):
     try:
         source = int(args[1])
         if source in SOURCE_TARGET_MAP:
+            if source in RUNNING_TASKS:
+                RUNNING_TASKS[source].cancel()
+                del RUNNING_TASKS[source]
             SOURCE_TARGET_MAP.pop(source)
             LAST_IDS.pop(source, None)
             await save_config()
@@ -185,21 +215,24 @@ async def list_handler(event):
 @admin_only
 async def reload_handler(event):
     await load_config()
-    await event.reply(f"Reloaded {len(SOURCE_TARGET_MAP)} mappings. Starting parallel processing...")
-    tasks = [process_source(source) for source in SOURCE_TARGET_MAP.keys()]
-    if tasks:
-        await asyncio.gather(*tasks)
+    for task in RUNNING_TASKS.values():
+        task.cancel()
+    RUNNING_TASKS.clear()
+    await event.reply(f"Reloaded {len(SOURCE_TARGET_MAP)} mappings. Restarting processing...")
+    for source in SOURCE_TARGET_MAP.keys():
+        await start_processing(source)
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern=r'^/status$'))
 @admin_only
 async def status_handler(event):
     bandwidth = VIDEOS_PROCESSED * (MAX_VIDEO_SIZE/1024/1024/1024) * 2
-    status = f"**Status**\nVideos processed: `{VIDEOS_PROCESSED}`\nMax size: `{MAX_VIDEO_SIZE/1024/1024}MB`\nBandwidth: `{bandwidth:.1f} GB`\n\n"
+    status = f"**Status**\nVideos processed: `{VIDEOS_PROCESSED}`\nMax size: `{MAX_VIDEO_SIZE/1024/1024}MB`\nEst. bandwidth: `{bandwidth:.1f} GB`\nActive mappings: `{len(SOURCE_TARGET_MAP)}`\n\n"
     if SOURCE_TARGET_MAP:
         status += "**Mappings:**\n"
         for source, target in SOURCE_TARGET_MAP.items():
             last = LAST_IDS.get(source, 0)
-            status += f"`{source}` -> `{target}` | Last: `{last}`\n"
+            running = "Running" if source in RUNNING_TASKS else "Stopped"
+            status += f"`{source}` -> `{target}` | Last: `{last}` | {running}\n"
     else:
         status += "No sources configured."
     await event.reply(status, parse_mode='md')
