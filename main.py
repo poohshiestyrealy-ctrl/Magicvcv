@@ -13,11 +13,11 @@ SOURCE_CHANNELS = set()
 
 async def get_config():
     pinned = await client.get_messages(LOG_CHANNEL, ids=0)
-    if not pinned or not pinned[0]:
+    if not pinned:
         return set()
 
     sources = set()
-    for line in pinned[0].message.split("\n"):
+    for line in pinned.message.split("\n"):
         line = line.strip()
         if line and not line.startswith("#") and line.startswith("-100"):
             try:
@@ -31,8 +31,8 @@ async def update_pinned_config(sources):
     content += "\n".join(str(s) for s in sorted(sources))
 
     pinned = await client.get_messages(LOG_CHANNEL, ids=0)
-    if pinned and pinned[0]:
-        await client.edit_message(LOG_CHANNEL, pinned[0].id, content)
+    if pinned:
+        await client.edit_message(LOG_CHANNEL, pinned.id, content)
     else:
         msg = await client.send_message(LOG_CHANNEL, content)
         await client.pin_message(LOG_CHANNEL, msg.id)
@@ -117,7 +117,7 @@ async def help_handler(event):
         "`/list` - Show all sources\n"
         "`/reload` - Reload config without restart\n"
         "`/help` - This message\n\n"
-        "**Note:** After `/add` or `/remove`, run `/reload` or restart bot to apply changes."
+        "**Note:** After `/add` or `/remove`, run `/reload` to apply changes."
     )
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/reload'))
