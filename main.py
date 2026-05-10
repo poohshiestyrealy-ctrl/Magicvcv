@@ -2,24 +2,27 @@ import asyncio
 import random
 import time
 import json
+import os
 from collections import deque
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, PeerFloodError, ChatWriteForbiddenError
 
-API_ID = 12345 # Your api_id
-API_HASH = 'your_api_hash'
-SESSION = 'mirrorbot'
-BOT_TOKEN = 'your_bot_token_here'
+# --- CONFIG: Reads from Railway Variables ---
+API_ID = int(os.environ['API_ID'])
+API_HASH = os.environ['API_HASH']
+SESSION_STRING = os.environ['SESSION_STRING']
 
-TARGET_CHANNEL = -100123456789 # Where videos go
-LOG_CHANNEL = -100987654321 # Botlogs channel for /add /remove /list
-CONFIG_MSG_ID = 2 # Pinned message ID in Botlogs holding JSON config
+TARGET_CHANNEL = int(os.environ['TARGET_CHANNEL'])
+LOG_CHANNEL = int(os.environ['LOG_CHANNEL'])
+CONFIG_MSG_ID = 2 # Change this to your pinned config message ID in Botlogs
 
-client = TelegramClient(SESSION, API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# --- Client setup: USERBOT MODE WITH STRING SESSION ---
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 # --- Global state ---
 SOURCE_CHANNELS = set()
-UPLOAD_TIMESTAMPS = deque(maxlen=20) # Track last 20 uploads for rate limit
+UPLOAD_TIMESTAMPS = deque(maxlen=20) # For 20 uploads/hour rate limit
 LAST_ERROR_TIME = 0
 ERROR_COUNT = 0
 
@@ -29,7 +32,8 @@ async def load_config():
         msg = await client.get_messages(LOG_CHANNEL, ids=CONFIG_MSG_ID)
         data = json.loads(msg.text)
         return set(data.get('sources', []))
-    except:
+    except Exception as e:
+        print(f"Config load failed: {e}")
         return set()
 
 async def save_config(sources):
@@ -93,13 +97,13 @@ async def forward_video(message):
         protected = await is_protected(source_id)
 
         if protected:
-            # Protected = native forward, no upload = safest
+            # Protected channel = native forward, keeps "Forwarded from" tag
             await client.forward_messages(TARGET_CHANNEL, message)
             print(f"FORWARDED {message.id} from {source_id} - protected")
         else:
-            # Unprotected = re-upload with delays
+            # Unprotected = re-upload clean with delays
             await global_rate_limit()
-            delay = random.randint(180, 300) # 3-5 min. Higher = safer
+            delay = random.randint(180, 300) # 3-5 min delay
             print(f"Safe delay: {delay}s before re-upload")
             await asyncio.sleep(delay)
 
@@ -164,9 +168,8 @@ async def list_handler(event):
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/reload'))
 async def reload_handler(event):
-    global SOURCE_CHANNELS
     await reload_sources()
-    await event.reply(f"Reloaded {len(SOURCE_CHANNELS)} sources. Now listening to: `{list(SOURCE_CHANNELS)}`")
+    await event.reply(f"Reloaded {len(SOURCE_CHANNELS)} sources: `{list(SOURCE_CHANNELS)}`")
 
     # Scan old videos after reload
     last_ids = await get_last_ids()
@@ -201,6 +204,10 @@ async def video_handler(event):
 
 # --- Startup ---
 async def main():
+    await client.start()
+    me = await client.get_me()
+    print(f"Logged in as: {me.username or me.first_name}")
+
     await reload_sources()
     print(f"Bot started. Listening to: {SOURCE_CHANNELS}")
 
@@ -222,4 +229,5 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
-    client.loop.run_until_complete(main())
+    with client:
+        client.loop.run_until_complete(main())
