@@ -25,6 +25,7 @@ UPLOAD_TIMESTAMPS = deque(maxlen=20)
 LAST_ERROR_TIME = 0
 ERROR_COUNT = 0
 CONFIG_MSG_ID = None
+SCAN_COMPLETE = False # Prevents live handler from running during startup scan
 
 # --- Config helpers ---
 async def find_or_create_config():
@@ -81,18 +82,27 @@ async def reload_sources():
 # --- Dupe tracking via Botlogs ---
 async def get_last_ids():
     last_ids = {}
-    async for msg in client.iter_messages(LOG_CHANNEL, limit=1000):
-        if msg.text and ':' in msg.text and not msg.text.startswith('/') and not msg.text.startswith('{'):
+    count = 0
+    # Only read text messages, ignore service/pinned/config
+    async for msg in client.iter_messages(LOG_CHANNEL, limit=2000):
+        if msg.text and ':' in msg.text and not msg.text.startswith('/') and not msg.text.startswith('{') and not msg.pinned and not msg.action:
             try:
                 sid, mid = msg.text.split(':')
                 sid, mid = int(sid), int(mid)
                 if sid not in last_ids or mid > last_ids[sid]:
                     last_ids[sid] = mid
-            except: continue
+                    count += 1
+            except: 
+                continue
+    print(f"Loaded {count} last_id entries from logs: {last_ids}")
     return last_ids
 
 async def save_last_id(source_id, msg_id):
-    await client.send_message(LOG_CHANNEL, f"{source_id}:{msg_id}")
+    try:
+        await client.send_message(LOG_CHANNEL, f"{source_id}:{msg_id}")
+        print(f"Saved checkpoint: {source_id}:{msg_id}")
+    except Exception as e:
+        print(f"Failed to save last_id {source_id}:{msg_id}: {e}")
 
 # --- Spam protection ---
 async def check_circuit_breaker():
@@ -116,9 +126,12 @@ async def forward_video(message):
     global LAST_ERROR_TIME, ERROR_COUNT
     if await check_circuit_breaker():
         return
+    
+    source_id = message.chat_id
     try:
-        source_id = message.chat_id
-        # ALWAYS RE-UPLOAD - forwarding is blocked on most protected channels
+        # Save checkpoint BEFORE doing anything slow. Prevents dupes on crash/restart
+        await save_last_id(source_id, message.id)
+        
         await global_rate_limit()
         delay = random.randint(180, 300)
         print(f"Safe delay: {delay}s before re-upload of {message.id}")
@@ -134,12 +147,10 @@ async def forward_video(message):
 
         UPLOAD_TIMESTAMPS.append(time.time())
         print(f"RE-UPLOADED {message.id} from {source_id} - clean")
-        await save_last_id(source_id, message.id)
         ERROR_COUNT = 0
 
     except ChatForwardsRestrictedError:
         print(f"Cannot forward or download {message.id} - channel blocks saving completely")
-        await save_last_id(source_id, message.id) # Skip it so we don't retry forever
     except FloodWaitError as e:
         LAST_ERROR_TIME = time.time()
         ERROR_COUNT += 1
@@ -236,11 +247,14 @@ async def help_handler(event):
 # --- Live mirroring ---
 @client.on(events.NewMessage())
 async def video_handler(event):
+    if not SCAN_COMPLETE: # Don't process live events during startup scan
+        return
     if event.chat_id in SOURCE_CHANNELS and (event.video or (event.document and event.document.mime_type and event.document.mime_type.startswith('video'))):
         await forward_video(event)
 
 # --- Startup ---
 async def main():
+    global SCAN_COMPLETE
     await client.start()
     me = await client.get_me()
     print(f"Logged in as: {me.username or me.first_name}")
@@ -257,6 +271,8 @@ async def main():
                 messages.append(message)
         for message in reversed(messages):
             await forward_video(message)
+    
+    SCAN_COMPLETE = True
     print("Scan complete. Watching for new videos...")
     await client.run_until_disconnected()
 
