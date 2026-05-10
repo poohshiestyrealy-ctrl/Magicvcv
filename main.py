@@ -15,7 +15,7 @@ SESSION_STRING = os.environ['SESSION_STRING']
 LOG_CHANNEL = int(os.environ['LOG_CHANNEL'])
 # Strip spaces to fix "8799097823 " bug
 ADMIN_IDS = [int(x.strip()) for x in os.environ.get('ADMIN_IDS', '').split(',') if x.strip()]
-MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', '300')) * 1024 # 300MB default
+MAX_VIDEO_SIZE = int(os.environ.get('MAX_VIDEO_SIZE', '300')) * 1024 * 1024 # 300MB default - FIXED
 
 # --- Client setup ---
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -35,7 +35,7 @@ VIDEOS_SKIPPED_SIZE = 0
 def admin_only(func):
     async def wrapper(event):
         if event.sender_id not in ADMIN_IDS:
-            await event.reply(f"You are not authorized. Your ID: {event.sender_id}")
+            await event.reply(f"You are not authorized. Your ID: `{event.sender_id}`")
             return
         await func(event)
     return wrapper
@@ -142,9 +142,9 @@ async def forward_video(message):
     if not file_ref:
         return
 
-    # Size check - 300MB limit
+    # Size check - now correctly in MB
     if file_ref.size > MAX_VIDEO_SIZE:
-        print(f"Skipping {message.id} - too large: {file_ref.size / 1024 / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
+        print(f"Skipping {message.id} - too large: {file_ref.size / 1024 / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024:.0f} MB")
         await save_last_id(source_id, message.id, target_id)
         VIDEOS_SKIPPED_SIZE += 1
         return
@@ -329,7 +329,7 @@ async def main():
     me = await client.get_me()
     print(f"Logged in as: {me.username or me.first_name}")
     print(f"Admins: {ADMIN_IDS}")
-    print(f"Max video size: {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB") # Fixed log
+    print(f"Max video size: {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB") # Now shows correct MB
     await find_or_create_config()
     await reload_sources()
     print(f"Bot started. Mappings: {SOURCE_TARGET_MAP}")
