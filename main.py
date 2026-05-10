@@ -6,7 +6,7 @@ import os
 from collections import deque
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, PeerFloodError, ChatWriteForbiddenError, MessageIdInvalidError
+from telethon.errors import FloodWaitError, PeerFloodError, ChatWriteForbiddenError, MessageIdInvalidError, ChatForwardsRestrictedError
 
 # --- CONFIG: Reads from Railway Variables ---
 API_ID = int(os.environ['API_ID'])
@@ -29,7 +29,6 @@ CONFIG_MSG_ID = None
 # --- Config helpers ---
 async def find_or_create_config():
     global CONFIG_MSG_ID
-    # Only search for existing pinned config, never create
     try:
         async for msg in client.iter_messages(LOG_CHANNEL, limit=50):
             if msg and msg.text and msg.text.startswith('{"sources":') and msg.pinned:
@@ -96,13 +95,6 @@ async def save_last_id(source_id, msg_id):
     await client.send_message(LOG_CHANNEL, f"{source_id}:{msg_id}")
 
 # --- Spam protection ---
-async def is_protected(chat_id):
-    try:
-        entity = await client.get_entity(chat_id)
-        return getattr(entity, 'noforwards', False)
-    except:
-        return False
-
 async def check_circuit_breaker():
     global ERROR_COUNT
     if ERROR_COUNT >= 3 and time.time() - LAST_ERROR_TIME < 86400:
@@ -126,20 +118,28 @@ async def forward_video(message):
         return
     try:
         source_id = message.chat_id
-        protected = await is_protected(source_id)
-        if protected:
-            await client.forward_messages(TARGET_CHANNEL, message)
-            print(f"FORWARDED {message.id} from {source_id} - protected")
-        else:
-            await global_rate_limit()
-            delay = random.randint(180, 300)
-            print(f"Safe delay: {delay}s before re-upload")
-            await asyncio.sleep(delay)
+        # ALWAYS RE-UPLOAD - forwarding is blocked on most protected channels
+        await global_rate_limit()
+        delay = random.randint(180, 300)
+        print(f"Safe delay: {delay}s before re-upload of {message.id}")
+        await asyncio.sleep(delay)
+
+        if message.video:
             await client.send_file(TARGET_CHANNEL, message.video, caption="")
-            UPLOAD_TIMESTAMPS.append(time.time())
-            print(f"RE-UPLOADED {message.id} from {source_id} - clean")
+        elif message.document:
+            await client.send_file(TARGET_CHANNEL, message.document, caption="")
+        else:
+            print(f"Skipping {message.id} - not a video")
+            return
+
+        UPLOAD_TIMESTAMPS.append(time.time())
+        print(f"RE-UPLOADED {message.id} from {source_id} - clean")
         await save_last_id(source_id, message.id)
         ERROR_COUNT = 0
+
+    except ChatForwardsRestrictedError:
+        print(f"Cannot forward or download {message.id} - channel blocks saving completely")
+        await save_last_id(source_id, message.id) # Skip it so we don't retry forever
     except FloodWaitError as e:
         LAST_ERROR_TIME = time.time()
         ERROR_COUNT += 1
@@ -209,7 +209,7 @@ async def reload_handler(event):
 
 @client.on(events.NewMessage(chats=LOG_CHANNEL, pattern='/scan'))
 async def scan_handler(event):
-    await event.reply("Starting full rescan. This ignores history and re-downloads everything.")
+    await event.reply("Starting full rescan. This re-uploads everything with delays.")
     sources = await load_config()
     for source in sources:
         await event.reply(f"Scanning {source}...")
