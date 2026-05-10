@@ -143,7 +143,7 @@ async def forward_video(message):
 
     # Size check - 300MB limit
     if file_ref.size > MAX_VIDEO_SIZE:
-        print(f"Skipping {message.id} - too large: {file_ref.size / 1024 / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
+        print(f"Skipping {message.id} - too large: {file_ref.size / 1024:.2f} MB > {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB")
         await save_last_id(source_id, message.id, target_id)
         VIDEOS_SKIPPED_SIZE += 1
         return
@@ -322,7 +322,7 @@ async def main():
     me = await client.get_me()
     print(f"Logged in as: {me.username or me.first_name}")
     print(f"Admins: {ADMIN_IDS}")
-    print(f"Max video size: {MAX_VIDEO_SIZE / 1024:.0f} MB")
+    print(f"Max video size: {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB") # Fixed log
     await find_or_create_config()
     await reload_sources()
     print(f"Bot started. Mappings: {SOURCE_TARGET_MAP}")
