@@ -14,7 +14,7 @@ LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL"))
 ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "").split(",")))
 
 CONFIG_FILE = "config.json"
-MAX_FILE_SIZE = 200 * 1024 # 200MB
+MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB - FIXED: was 200KB before
 RETRY_DELAYS = [60, 120, 300, 600, 1800] # 1m, 2m, 5m, 10m, 30m
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -101,7 +101,7 @@ async def process_source(source_id):
     try:
         # Resolve source entity - works for @username or if joined
         entity = await client.get_entity(source_id)
-        print(f"Resolved source: {entity.title}")
+        print(f"Resolved source: {getattr(entity, 'title', entity.id)}")
     except Exception as e:
         print(f"Can't access source {source_id}: {e}")
         return
@@ -112,9 +112,10 @@ async def process_source(source_id):
                 continue
 
             if message.video or (message.document and message.document.mime_type and message.document.mime_type.startswith('video')):
-                # Skip files > 200MB
+                # Skip files > 200MB - FIXED calculation
                 if message.file and message.file.size > MAX_FILE_SIZE:
-                    print(f"Skipping {message.id} - {message.file.size / 1024 / 1024:.1f}MB > 200MB")
+                    size_mb = message.file.size / 1024 / 1024
+                    print(f"Skipping {message.id} - {size_mb:.1f}MB > 200MB")
                     LAST_IDS[source_id] = message.id
                     await save_config()
                     continue
