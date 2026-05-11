@@ -15,7 +15,7 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-MAX_FILE_SIZE = 200 * 1024 # 200MB
+MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
 MAX_DURATION = 60 # seconds - videos SHORTER than this get cleaned
 MIN_WIDTH = 1280 # px - 720p width - videos smaller than this get cleaned
 MIN_HEIGHT = 720 # px - 720p height - videos smaller than this get cleaned
@@ -311,14 +311,24 @@ async def clean_here(event):
             if checked % 50 == 0:
                 await event.reply(f"Checked {checked}... Moved {moved} so far")
 
+            video_meta = None
+            # Check message.video first
             if message.video:
+                video_meta = message.video
+            # Check if it's a document with video attributes
+            elif message.document:
+                for attr in message.document.attributes:
+                    if type(attr).__name__ == 'DocumentAttributeVideo':
+                        video_meta = attr
+                        break
+
+            if video_meta:
                 should_move = False
                 reason = ""
 
-                # Safely get video attributes - prevents 'Document' crash
-                duration = getattr(message.video, 'duration', 0)
-                width = getattr(message.video, 'w', 0)
-                height = getattr(message.video, 'h', 0)
+                duration = getattr(video_meta, 'duration', 0)
+                width = getattr(video_meta, 'w', 0)
+                height = getattr(video_meta, 'h', 0)
 
                 if duration and duration < MAX_DURATION:
                     should_move = True
