@@ -3,7 +3,6 @@ import json
 import asyncio
 import logging
 import time
-import psutil
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError, ChannelPrivateError
@@ -17,13 +16,13 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 SESSION_STRING = os.environ["SESSION_STRING"]
-ADMIN_ID = int(os.environ["ADMIN_ID"])
+ADMIN_IDS = [int(x.strip()) for x in os.environ["ADMIN_IDS"].split(",")] # Multiple admins
 LOG_CHANNEL = int(os.environ["LOG_CHANNEL"])
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 # SETTINGS
-MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB cap
+MAX_FILE_SIZE = int(os.environ.get("MAX_VIDEO_SIZE", 209715200)) # 200MB from your env
 
 # Init
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -36,6 +35,9 @@ start_time = time.time()
 copied_count = 0
 scraped_count = 0
 skipped_count = 0
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
 async def load_config():
     global CONFIG
@@ -73,11 +75,12 @@ async def check_access(chat_id):
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
-    if event.sender_id!= ADMIN_ID:
+    if not is_admin(event.sender_id):
         return
     await event.reply(
         "Video-only bot online.\n"
-        f"Max file size: `{MAX_FILE_SIZE/1024/1024:.0f}MB`\n\n"
+        f"Max file size: `{MAX_FILE_SIZE/1024/1024:.0f}MB`\n"
+        f"Admins: `{len(ADMIN_IDS)}`\n\n"
         "**Commands:**\n"
         "/addsource `source_id` `target_id`\n"
         "/removesource `source_id`\n"
@@ -89,7 +92,7 @@ async def start(event):
 
 @client.on(events.NewMessage(pattern='/help'))
 async def help_cmd(event):
-    if event.sender_id!= ADMIN_ID:
+    if not is_admin(event.sender_id):
         return
     await event.reply(
         f"**Video-Only Bot**\n\n"
@@ -104,7 +107,7 @@ async def help_cmd(event):
         "`/listmappings`\n\n"
         "**4. Scrape old videos:**\n"
         "`/scrape -100123456789`\n"
-        "Copies last 100 videos ≤200MB with 3.5s delay.\n\n"
+        f"Copies last 100 videos ≤{MAX_FILE_SIZE/1024/1024:.0f}MB with 3.5s delay.\n\n"
         "**5. Check stats:**\n"
         "`/stats`\n\n"
         "**Notes:**\n"
@@ -115,13 +118,12 @@ async def help_cmd(event):
 
 @client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
-    if event.sender_id!= ADMIN_ID:
+    if not is_admin(event.sender_id):
         return
     try:
         _, source, target = event.text.split()
         source_id, target_id = int(source), int(target)
 
-        # Check access to both channels before saving
         ok_s, err_s = await check_access(source_id)
         if not ok_s:
             await event.reply(f"Cannot access source `{source_id}`: {err_s}")
@@ -134,13 +136,13 @@ async def add_source(event):
 
         CONFIG["sources"][str(source_id)] = str(target_id)
         await save_config()
-        await event.reply(f"Added: `{source_id}` → `{target_id}`\nVideo-only, 200MB cap. Access verified.")
+        await event.reply(f"Added: `{source_id}` → `{target_id}`\nVideo-only, {MAX_FILE_SIZE/1024/1024:.0f}MB cap. Access verified.")
     except Exception as e:
         await event.reply(f"Error: {e}\nUsage: /addsource -100source -100target")
 
 @client.on(events.NewMessage(pattern='/removesource'))
 async def remove_source(event):
-    if event.sender_id!= ADMIN_ID:
+    if not is_admin(event.sender_id):
         return
     try:
         _, source = event.text.split()
@@ -156,7 +158,7 @@ async def remove_source(event):
 
 @client.on(events.NewMessage(pattern='/listmappings'))
 async def list_mappings(event):
-    if event.sender_id!= ADMIN_ID:
+    if not is_admin(event.sender_id):
         return
     if not CONFIG["sources"]:
         await event.reply("No mappings yet.")
@@ -168,21 +170,20 @@ async def list_mappings(event):
 
 @client.on(events.NewMessage(pattern='/stats'))
 async def stats(event):
-    if event.sender_id!= ADMIN_ID:
+    if not is_admin(event.sender_id):
         return
     uptime = time.time() - start_time
     h = int(uptime // 3600)
     m = int(uptime%3600//60)
-    mem = psutil.virtual_memory()
     await event.reply(
         f"**Stats**\n"
         f"Mode: Video-only, clean reupload\n"
         f"Max size: `{MAX_FILE_SIZE/1024/1024:.0f}MB`\n"
+        f"Admins: `{len(ADMIN_IDS)}`\n"
         f"Uptime: `{h}h {m}m`\n"
-        f"RAM: `{mem.used/1024/1024:.1f}MB`\n"
         f"Videos copied: `{copied_count}`\n"
         f"Videos scraped: `{scraped_count}`\n"
-        f"Skipped >200MB: `{skipped_count}`\n"
+        f"Skipped >{MAX_FILE_SIZE/1024/1024:.0f}MB: `{skipped_count}`\n"
         f"Mappings: `{len(CONFIG['sources'])}`\n"
         f"Scrape delay: `3.5s`"
     )
@@ -190,7 +191,7 @@ async def stats(event):
 @client.on(events.NewMessage(pattern='/scrape'))
 async def scrape_history(event):
     global scraped_count, skipped_count
-    if event.sender_id!= ADMIN_ID:
+    if not is_admin(event.sender_id):
         return
     args = event.text.split()
     if len(args)!= 2:
@@ -209,7 +210,6 @@ async def scrape_history(event):
 
     target_id = int(CONFIG["sources"][str(source_id)])
 
-    # Verify target access before starting
     ok, err = await check_access(target_id)
     if not ok:
         await event.reply(f"Cannot access target `{target_id}`: {err}")
@@ -243,7 +243,7 @@ async def scrape_history(event):
                 logger.error(f"Scrape failed: {e}")
                 errors += 1
 
-        await event.reply(f"Done.\nVideos copied: `{count}`\nSkipped >200MB: `{skipped_count}`\nErrors: `{errors}`")
+        await event.reply(f"Done.\nVideos copied: `{count}`\nSkipped >{MAX_FILE_SIZE/1024/1024:.0f}MB: `{skipped_count}`\nErrors: `{errors}`")
     except Exception as e:
         await event.reply(f"Scrape failed: {e}")
 
@@ -256,7 +256,7 @@ async def handler(event):
             if event.message.video:
                 if event.message.file.size > MAX_FILE_SIZE:
                     skipped_count += 1
-                    await client.send_message(LOG_CHANNEL, f"Skipped {event.message.file.size/1024/1024:.1f}MB video from `{source_id}` - exceeds 200MB")
+                    await client.send_message(LOG_CHANNEL, f"Skipped {event.message.file.size/1024/1024:.1f}MB video from `{source_id}` - exceeds {MAX_FILE_SIZE/1024/1024:.0f}MB")
                     return
 
                 await client.send_file(target_id, event.message.file, caption="")
@@ -284,8 +284,8 @@ async def main():
         client.add_event_handler(handler, events.NewMessage(chats=list(map(int, CONFIG["sources"].keys()))))
     await client.start()
     me = await client.get_me()
-    logger.info(f"Video bot started as {me.first_name}")
-    await client.send_message(LOG_CHANNEL, f"Video-only bot started. 200MB cap. Clean reupload.")
+    logger.info(f"Video bot started as {me.first_name}. Admins: {len(ADMIN_IDS)}")
+    await client.send_message(LOG_CHANNEL, f"Video-only bot started. {MAX_FILE_SIZE/1024/1024:.0f}MB cap. {len(ADMIN_IDS)} admins.")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
