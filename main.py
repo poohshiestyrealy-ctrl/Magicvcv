@@ -20,7 +20,7 @@ MAX_FILE_SIZE = 200 * 1024 # 200MB
 MAX_DURATION = 60 # seconds - videos SHORTER than this get cleaned
 MIN_WIDTH = 1280 # px - 720p width - videos smaller than this get cleaned
 MIN_HEIGHT = 720 # px - 720p height - videos smaller than this get cleaned
-MIN_FILE_SIZE_NO_META = 8 * 1024 * 1024 # 8MB - fallback for videos with no metadata
+MIN_FILE_SIZE_NO_META = 15 * 1024 * 1024 # 15MB - aggressive: moves most <60s videos with no metadata
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -116,8 +116,8 @@ async def check_vars(event):
 async def start(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024 // 1024
-    min_mb_no_meta = MIN_FILE_SIZE_NO_META // 1024 // 1024
+    max_mb = MAX_FILE_SIZE // 1024
+    min_mb_no_meta = MIN_FILE_SIZE_NO_META // 1024
     await event.reply(
         f"**Video-Only Bot**\n\n"
         f"**Max video size:** {max_mb}MB\n"
@@ -133,15 +133,18 @@ async def start(event):
         f"`/scrape -100123456789`\n"
         f"Re-uploads ALL videos ≤{max_mb}MB with 3.5s delay.\n"
         f"`/scrape -100id fresh` - restart scrape from beginning\n\n"
-        f"**5. Clean videos remotely:**\n"
+        f"**5. Clean bad videos:**\n"
         f"`/cleanhere -100clean_id -100trash_id`\n"
-        f"Moves videos if:\n"
+        f"Moves videos to trash if:\n"
         f"• Duration <{MAX_DURATION}s OR\n"
         f"• Resolution <{MIN_WIDTH}x{MIN_HEIGHT} OR\n"
         f"• NO METADATA + File size <{min_mb_no_meta}MB\n\n"
-        f"**6. Check stats:**\n"
+        f"**6. Purge non-videos:**\n"
+        f"`/purgenonvideo -100channel_id`\n"
+        f"Deletes photos/text/audio/docs permanently. Videos untouched.\n\n"
+        f"**7. Check stats:**\n"
         f"`/stats`\n\n"
-        f"**7. Debug vars:**\n"
+        f"**8. Debug vars:**\n"
         f"`/checkvars`\n\n"
         f"**Notes:**\n"
         f"- Clean reupload: no captions, no forward tags\n"
@@ -211,6 +214,17 @@ async def list_mappings(event):
     for src, dst in CONFIG["sources"].items():
         msg += f"`{src}` → `{dst}`\n"
     await event.reply(msg)
+
+
+
+
+
+
+
+
+
+
+
 
 @client.on(events.NewMessage(pattern='/scrape'))
 async def scrape_history(event):
@@ -356,24 +370,21 @@ async def clean_here(event):
                 should_move = False
                 reason = ""
 
-                # Priority 1: Duration exists and is bad
                 if duration > 0 and duration < MAX_DURATION:
                     should_move = True
                     reason = f"{duration}s < {MAX_DURATION}s"
-
-                # Priority 2: Resolution exists and is bad
                 elif width > 0 and height > 0 and (width < MIN_WIDTH or height < MIN_HEIGHT):
                     should_move = True
                     reason = f"{width}x{height} < {MIN_WIDTH}x{MIN_HEIGHT}"
-
-                # Priority 3: NO usable metadata - fall back to file size
                 elif duration == 0 and (width == 0 or height == 0):
-                    if file_size < MIN_FILE_SIZE_NO_META:
+                    if file_size == 0:
+                        should_move = True
+                        reason = "No metadata and file size 0"
+                    elif file_size < MIN_FILE_SIZE_NO_META:
                         should_move = True
                         reason = f"No metadata, size {file_size//1024//1024}MB < {MIN_FILE_SIZE_NO_META//1024//1024}MB"
                     else:
                         reason = f"No metadata but size {file_size//1024//1024}MB >= {MIN_FILE_SIZE_NO_META//1024//1024}MB - keeping"
-
                 else:
                     reason = f"Good: {duration}s {width}x{height}"
 
@@ -384,7 +395,7 @@ async def clean_here(event):
                         await client.send_file(
                             trash_id,
                             message.media,
-                            caption=f"From {clean_channel_id}\nReason: {reason}",
+                            caption="",
                             attributes=[video_meta],
                             force_document=False
                         )
@@ -409,6 +420,78 @@ async def clean_here(event):
         await event.reply(f"**Clean done**\nChecked: `{checked}`\nVideos found: `{found_videos}`\nMoved: `{moved}`\nKept: `{kept}`\nErrors: `{errors}`\n\n**Sample moved:**\n```\n{moved_samples}\n```\n\n**Sample kept:**\n```\n{kept_samples}\n```")
     except Exception as e:
         await event.reply(f"Clean failed: {e}")
+
+@client.on(events.NewMessage(pattern='/purgenonvideo'))
+async def purge_non_video(event):
+    if not is_admin(event.sender_id):
+        return
+
+    args = event.text.split()
+    if len(args) < 2:
+        await event.reply(
+            "**Usage:** `/purgenonvideo -100channel_id`\n\n"
+            "Deletes ALL non-video content permanently.\n"
+            "Photos, text, audio, docs, stickers, GIFs - all gone.\n"
+            "Videos are completely ignored and left untouched.\n\n"
+            "Example: `/purgenonvideo -1001111111111`"
+        )
+        return
+
+    try:
+        channel_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid channel ID. Must be like `-1001234567890`")
+        return
+
+    ok, err = await check_access(channel_id)
+    if not ok:
+        await event.reply(f"Cannot access channel `{channel_id}`: {err}")
+        return
+
+    await event.reply(f"PURGE MODE: `{channel_id}`\nDeleting ALL non-videos permanently.\nVideos will be ignored.\nStarting in 5s...")
+    await asyncio.sleep(5)
+
+    checked = 0
+    deleted = 0
+    skipped_videos = 0
+    errors = 0
+    sample_deleted = []
+
+    try:
+        async for message in client.iter_messages(channel_id, limit=None):
+            checked += 1
+
+            if is_video_message(message):
+                skipped_videos += 1
+                continue
+            else:
+                if len(sample_deleted) < 5:
+                    msg_type = type(message.media).__name__ if message.media else "Text"
+                    sample_deleted.append(f"{msg_type} ID:{message.id}")
+                try:
+                    await message.delete()
+                    deleted += 1
+                    await asyncio.sleep(1.5)
+                except FloodWaitError as e:
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    logger.error(f"Delete failed: {e}")
+                    errors += 1
+
+            if checked % 200 == 0:
+                await event.reply(f"Checked {checked}... Deleted: {deleted}... Videos skipped: {skipped_videos}")
+
+        deleted_samples = "\n".join(sample_deleted) if sample_deleted else "None"
+        await event.reply(
+            f"**PURGE DONE**\n"
+            f"Checked: `{checked}` messages\n"
+            f"Non-videos deleted: `{deleted}`\n"
+            f"Videos skipped: `{skipped_videos}`\n"
+            f"Errors: `{errors}`\n\n"
+            f"**Sample deleted:**\n```\n{deleted_samples}\n```"
+        )
+    except Exception as e:
+        await event.reply(f"Purge failed: {e}")
 
 @client.on(events.NewMessage(pattern='/stats'))
 async def stats(event):
