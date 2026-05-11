@@ -213,7 +213,7 @@ async def scrape_history(event):
         return
 
     target_id = int(CONFIG["sources"][str(source_id)])
-    max_mb = MAX_FILE_SIZE // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
 
     ok, err = await check_access(target_id)
     if not ok:
@@ -314,6 +314,7 @@ async def clean_here(event):
     kept = 0
     errors = 0
     sample_kept = []
+    sample_moved = []
 
     try:
         async for message in client.iter_messages(clean_channel_id, limit=None):
@@ -348,6 +349,8 @@ async def clean_here(event):
                         sample_kept.append(f"ID:{message.id} {duration}s {width}x{height}")
 
                 if should_move:
+                    if len(sample_moved) < 5:
+                        sample_moved.append(f"ID:{message.id} {duration}s {width}x{height} -> {reason}")
                     try:
                         await client.send_file(trash_id, message.media, caption=f"From {clean_channel_id}\nReason: {reason}", force_document=False)
                         await message.delete()
@@ -364,8 +367,9 @@ async def clean_here(event):
             if checked % 100 == 0:
                 await event.reply(f"Checked {checked}... Videos: {found_videos}... Moved: {moved}")
 
-        samples = "\n".join(sample_kept) if sample_kept else "No kept samples or all moved"
-        await event.reply(f"**Clean done**\nChecked: `{checked}`\nVideos found: `{found_videos}`\nMoved: `{moved}`\nKept: `{kept}`\nErrors: `{errors}`\n\n**Sample kept videos:**\n```\n{samples}\n```")
+        kept_samples = "\n".join(sample_kept) if sample_kept else "None"
+        moved_samples = "\n".join(sample_moved) if sample_moved else "None"
+        await event.reply(f"**Clean done**\nChecked: `{checked}`\nVideos found: `{found_videos}`\nMoved: `{moved}`\nKept: `{kept}`\nErrors: `{errors}`\n\n**Sample moved:**\n```\n{moved_samples}\n```\n\n**Sample kept:**\n```\n{kept_samples}\n```")
     except Exception as e:
         await event.reply(f"Clean failed: {e}")
 
