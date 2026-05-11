@@ -91,6 +91,12 @@ async def check_access(chat_id):
     except Exception as e:
         return False, str(e)
 
+@client.on(events.NewMessage(pattern='/checkvars'))
+async def check_vars(event):
+    if not is_admin(event.sender_id):
+        return
+    await event.reply(f"MAX_DURATION={MAX_DURATION}\nMIN_WIDTH={MIN_WIDTH}\nMIN_HEIGHT={MIN_HEIGHT}\nMAX_FILE_SIZE={MAX_FILE_SIZE//1024//1024}MB")
+
 @client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
     if not is_admin(event.sender_id):
@@ -116,9 +122,11 @@ async def start(event):
         f"Moves videos <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash\n\n"
         f"**6. Check stats:**\n"
         f"`/stats`\n\n"
+        f"**7. Debug vars:**\n"
+        f"`/checkvars`\n\n"
         f"**Notes:**\n"
         f"- Clean reupload: no captions, no forward tags\n"
-        f"- Only MP4/MKV videos sent as 'video'\n"
+        f"- Handles videos sent as files\n"
         f"- Uses 2x bandwidth due to reupload"
     )
 
@@ -205,7 +213,7 @@ async def scrape_history(event):
         return
 
     target_id = int(CONFIG["sources"][str(source_id)])
-    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    max_mb = MAX_FILE_SIZE // 1024
 
     ok, err = await check_access(target_id)
     if not ok:
@@ -297,25 +305,23 @@ async def clean_here(event):
         await event.reply(f"Cannot access trash `{trash_id}`: {err_trash}")
         return
 
-    await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nFilters: <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\nStarting in 5s...")
-    await asyncio.sleep(5)
+    await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nFilters: <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\nStarting in 3s...")
+    await asyncio.sleep(3)
 
     checked = 0
+    found_videos = 0
     moved = 0
     kept = 0
     errors = 0
+    sample_kept = []
 
     try:
         async for message in client.iter_messages(clean_channel_id, limit=None):
             checked += 1
-            if checked % 50 == 0:
-                await event.reply(f"Checked {checked}... Moved {moved} so far")
 
             video_meta = None
-            # Check message.video first
             if message.video:
                 video_meta = message.video
-            # Check if it's a document with video attributes
             elif message.document:
                 for attr in message.document.attributes:
                     if type(attr).__name__ == 'DocumentAttributeVideo':
@@ -323,45 +329,43 @@ async def clean_here(event):
                         break
 
             if video_meta:
-                should_move = False
-                reason = ""
-
+                found_videos += 1
                 duration = getattr(video_meta, 'duration', 0)
                 width = getattr(video_meta, 'w', 0)
                 height = getattr(video_meta, 'h', 0)
 
+                should_move = False
+                reason = ""
+
                 if duration and duration < MAX_DURATION:
                     should_move = True
                     reason = f"{duration}s < {MAX_DURATION}s"
-
                 elif width and height and (width < MIN_WIDTH or height < MIN_HEIGHT):
                     should_move = True
                     reason = f"{width}x{height} < {MIN_WIDTH}x{MIN_HEIGHT}"
+                else:
+                    if len(sample_kept) < 5:
+                        sample_kept.append(f"ID:{message.id} {duration}s {width}x{height}")
 
                 if should_move:
                     try:
-                        await client.send_file(
-                            trash_id,
-                            message.media,
-                            caption=f"From {clean_channel_id}\nReason: {reason}",
-                            force_document=False
-                        )
+                        await client.send_file(trash_id, message.media, caption=f"From {clean_channel_id}\nReason: {reason}", force_document=False)
                         await message.delete()
                         moved += 1
                         await asyncio.sleep(3.5)
                     except FloodWaitError as e:
-                        await event.reply(f"Flood wait: sleeping {e.seconds}s")
                         await asyncio.sleep(e.seconds)
-                    except ChatAdminRequiredError:
-                        await event.reply(f"Error: Need admin delete rights in `{clean_channel_id}`")
-                        return
                     except Exception as e:
                         logger.error(f"Move failed: {e}")
                         errors += 1
                 else:
                     kept += 1
 
-        await event.reply(f"**Clean done**\nChannel: `{clean_channel_id}`\nChecked: `{checked}`\nMoved: `{moved}`\nKept: `{kept}`\nErrors: `{errors}`")
+            if checked % 100 == 0:
+                await event.reply(f"Checked {checked}... Videos: {found_videos}... Moved: {moved}")
+
+        samples = "\n".join(sample_kept) if sample_kept else "No kept samples or all moved"
+        await event.reply(f"**Clean done**\nChecked: `{checked}`\nVideos found: `{found_videos}`\nMoved: `{moved}`\nKept: `{kept}`\nErrors: `{errors}`\n\n**Sample kept videos:**\n```\n{samples}\n```")
     except Exception as e:
         await event.reply(f"Clean failed: {e}")
 
@@ -369,7 +373,7 @@ async def clean_here(event):
 async def stats(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
     await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nMappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage)
