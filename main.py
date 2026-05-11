@@ -15,7 +15,7 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB - actually 200MB now
+MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -43,7 +43,7 @@ async def save_mapping(source_id, target_id):
         supabase.table("mappings").upsert({
             "source_id": source_id,
             "target_id": target_id
-        }).execute()
+        }, on_conflict="source_id").execute()
         CONFIG["sources"][str(source_id)] = str(target_id)
         logger.info(f"Saved to Supabase: {source_id} -> {target_id}")
         return True
@@ -121,7 +121,7 @@ async def add_source(event):
         return
 
     if await save_mapping(source_id, target_id):
-        await event.reply(f"Added mapping:\n`{source_id}` → `{target_id}`")
+        await event.reply(f"Added/Updated mapping:\n`{source_id}` → `{target_id}`")
     else:
         await event.reply("Failed to save mapping to Supabase")
 
@@ -182,7 +182,7 @@ async def scrape_history(event):
         return
 
     target_id = int(CONFIG["sources"][str(source_id)])
-    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    max_mb = MAX_FILE_SIZE // 1024
 
     ok, err = await check_access(target_id)
     if not ok:
@@ -234,7 +234,7 @@ async def scrape_history(event):
 async def stats(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
     await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nMappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage)
