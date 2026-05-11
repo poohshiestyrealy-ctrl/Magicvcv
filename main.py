@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import asyncio
 import logging
@@ -16,13 +17,26 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 SESSION_STRING = os.environ["SESSION_STRING"]
-ADMIN_IDS = [int(x.strip()) for x in os.environ["ADMIN_IDS"].split(",")] # Multiple admins
+
+# ADMIN_IDS with debug + failsafe
+admin_ids_str = os.environ.get("ADMIN_IDS")
+if not admin_ids_str:
+    logger.error("ADMIN_IDS environment variable not found!")
+    logger.error(f"Available env vars: {list(os.environ.keys())}")
+    sys.exit("Missing ADMIN_IDS. Add it in Railway Variables and redeploy.")
+try:
+    ADMIN_IDS = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip()]
+    logger.info(f"Loaded {len(ADMIN_IDS)} admin IDs: {ADMIN_IDS}")
+except ValueError as e:
+    logger.error(f"ADMIN_IDS format error: {e}. Use comma-separated numbers like: 123,456,789")
+    sys.exit(1)
+
 LOG_CHANNEL = int(os.environ["LOG_CHANNEL"])
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 # SETTINGS
-MAX_FILE_SIZE = int(os.environ.get("MAX_VIDEO_SIZE", 209715200)) # 200MB from your env
+MAX_FILE_SIZE = int(os.environ.get("MAX_VIDEO_SIZE", 209715200))
 
 # Init
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
