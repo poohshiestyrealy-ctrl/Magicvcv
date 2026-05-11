@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
 from supabase import create_client, Client
 
