@@ -15,7 +15,7 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
+MAX_FILE_SIZE = 200 * 1024 # 200MB
 MAX_DURATION = 60 # seconds - videos SHORTER than this get cleaned
 MIN_WIDTH = 1280 # px - 720p width - videos smaller than this get cleaned
 MIN_HEIGHT = 720 # px - 720p height - videos smaller than this get cleaned
@@ -315,13 +315,18 @@ async def clean_here(event):
                 should_move = False
                 reason = ""
 
-                if message.video.duration and message.video.duration < MAX_DURATION:
-                    should_move = True
-                    reason = f"{message.video.duration}s < {MAX_DURATION}s"
+                # Safely get video attributes - prevents 'Document' crash
+                duration = getattr(message.video, 'duration', 0)
+                width = getattr(message.video, 'w', 0)
+                height = getattr(message.video, 'h', 0)
 
-                elif message.video.w < MIN_WIDTH or message.video.h < MIN_HEIGHT:
+                if duration and duration < MAX_DURATION:
                     should_move = True
-                    reason = f"{message.video.w}x{message.video.h} < {MIN_WIDTH}x{MIN_HEIGHT}"
+                    reason = f"{duration}s < {MAX_DURATION}s"
+
+                elif width and height and (width < MIN_WIDTH or height < MIN_HEIGHT):
+                    should_move = True
+                    reason = f"{width}x{height} < {MIN_WIDTH}x{MIN_HEIGHT}"
 
                 if should_move:
                     try:
@@ -354,7 +359,7 @@ async def clean_here(event):
 async def stats(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    max_mb = MAX_FILE_SIZE // 1024
     await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nMappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage)
