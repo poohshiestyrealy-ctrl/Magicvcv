@@ -15,7 +15,7 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
+MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB - actually 200MB now
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -51,6 +51,16 @@ async def save_mapping(source_id, target_id):
         logger.error(f"Save failed: {e}")
         return False
 
+async def remove_mapping(source_id):
+    try:
+        supabase.table("mappings").delete().eq("source_id", source_id).execute()
+        CONFIG["sources"].pop(str(source_id), None)
+        logger.info(f"Removed from Supabase: {source_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Remove failed: {e}")
+        return False
+
 async def check_access(chat_id):
     try:
         entity = await client.get_entity(chat_id)
@@ -62,11 +72,32 @@ async def check_access(chat_id):
     except Exception as e:
         return False, str(e)
 
-@client.on(events.NewMessage(pattern='/start'))
+@client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
     if not is_admin(event.sender_id):
         return
-    await event.reply("**Userbot active**\n\nCommands:\n`/addsource -100src -100dst`\n`/listsources`\n`/scrape -100src`\n`/stats`\n\nRe-uploads videos ≤200MB with no caption")
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    await event.reply(
+        f"**Video-Only Bot**\n\n"
+        f"**Max video size:** {max_mb}MB\n"
+        f"Larger files are skipped.\n\n"
+        f"**1. Add a channel pair:**\n"
+        f"`/addsource -100123456789 -100987654321`\n"
+        f"You must be in both channels with posting rights.\n\n"
+        f"**2. Remove a pair:**\n"
+        f"`/removesource -100123456789`\n\n"
+        f"**3. List all pairs:**\n"
+        f"`/listmappings`\n\n"
+        f"**4. Scrape old videos:**\n"
+        f"`/scrape -100123456789`\n"
+        f"Copies ALL videos ≤{max_mb}MB with 3.5s delay.\n\n"
+        f"**5. Check stats:**\n"
+        f"`/stats`\n\n"
+        f"**Notes:**\n"
+        f"- Clean reupload: no captions, no forward tags\n"
+        f"- Only MP4/MKV videos sent as 'video'\n"
+        f"- Uses 2x bandwidth due to reupload"
+    )
 
 @client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
@@ -94,8 +125,32 @@ async def add_source(event):
     else:
         await event.reply("Failed to save mapping to Supabase")
 
-@client.on(events.NewMessage(pattern='/listsources'))
-async def list_sources(event):
+@client.on(events.NewMessage(pattern='/removesource'))
+async def remove_source(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args)!= 2:
+        await event.reply("Usage: `/removesource -100source_id`")
+        return
+
+    try:
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID")
+        return
+
+    if str(source_id) not in CONFIG["sources"]:
+        await event.reply("Source not mapped")
+        return
+
+    if await remove_mapping(source_id):
+        await event.reply(f"Removed mapping for `{source_id}`")
+    else:
+        await event.reply("Failed to remove mapping from Supabase")
+
+@client.on(events.NewMessage(pattern='/listmappings'))
+async def list_mappings(event):
     if not is_admin(event.sender_id):
         return
     if not CONFIG["sources"]:
@@ -127,13 +182,14 @@ async def scrape_history(event):
         return
 
     target_id = int(CONFIG["sources"][str(source_id)])
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
 
     ok, err = await check_access(target_id)
     if not ok:
         await event.reply(f"Cannot access target `{target_id}`: {err}")
         return
 
-    await event.reply(f"Scraping ALL videos ≤{MAX_FILE_SIZE/1024/1024:.0f}MB from `{source_id}`...\nNo captions will be added.\n3.5s delay per video.")
+    await event.reply(f"Scraping ALL videos ≤{max_mb}MB from `{source_id}`...\nNo captions will be added.\n3.5s delay per video.")
 
     count = 0
     checked = 0
@@ -170,7 +226,7 @@ async def scrape_history(event):
                 logger.error(f"Scrape error: {e}")
                 errors += 1
 
-        await event.reply(f"Done.\nChecked: `{checked}` messages\nVideos copied: `{count}`\nSkipped >{MAX_FILE_SIZE/1024/1024:.0f}MB: `{skipped_count}`\nErrors: `{errors}`")
+        await event.reply(f"Done.\nChecked: `{checked}` messages\nVideos copied: `{count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nErrors: `{errors}`")
     except Exception as e:
         await event.reply(f"Scrape failed: {e}")
 
@@ -178,7 +234,8 @@ async def scrape_history(event):
 async def stats(event):
     if not is_admin(event.sender_id):
         return
-    await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >200MB: `{skipped_count}`\nMappings: `{len(CONFIG['sources'])}`")
+    max_mb = MAX_FILE_SIZE // 1024
+    await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nMappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage)
 async def auto_forward(event):
