@@ -182,7 +182,7 @@ async def scrape_history(event):
         return
 
     target_id = int(CONFIG["sources"][str(source_id)])
-    max_mb = MAX_FILE_SIZE // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024 # FIXED: was // 1024
 
     ok, err = await check_access(target_id)
     if not ok:
@@ -234,7 +234,7 @@ async def scrape_history(event):
 async def stats(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    max_mb = MAX_FILE_SIZE // 1024 # FIXED: was // 1024
     await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nMappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage)
