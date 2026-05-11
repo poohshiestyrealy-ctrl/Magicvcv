@@ -4,6 +4,7 @@ import logging
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
+from telethon.tl.types import DocumentAttributeVideo
 from supabase import create_client, Client
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -15,10 +16,11 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
+MAX_FILE_SIZE = 200 * 1024 # 200MB
 MAX_DURATION = 60 # seconds - videos SHORTER than this get cleaned
 MIN_WIDTH = 1280 # px - 720p width - videos smaller than this get cleaned
 MIN_HEIGHT = 720 # px - 720p height - videos smaller than this get cleaned
+MIN_FILE_SIZE_NO_META = 8 * 1024 * 1024 # 8MB - fallback for videos with no metadata
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -30,6 +32,19 @@ skipped_count = 0
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
+
+def get_video_attr(message):
+    """Extract DocumentAttributeVideo from message"""
+    if message.video:
+        return message.video
+    if message.document:
+        for attr in message.document.attributes:
+            if isinstance(attr, DocumentAttributeVideo):
+                return attr
+    return None
+
+def is_video_message(message):
+    return get_video_attr(message) is not None
 
 async def load_sources():
     global CONFIG
@@ -95,13 +110,14 @@ async def check_access(chat_id):
 async def check_vars(event):
     if not is_admin(event.sender_id):
         return
-    await event.reply(f"MAX_DURATION={MAX_DURATION}\nMIN_WIDTH={MIN_WIDTH}\nMIN_HEIGHT={MIN_HEIGHT}\nMAX_FILE_SIZE={MAX_FILE_SIZE//1024//1024}MB")
+    await event.reply(f"MAX_DURATION={MAX_DURATION}\nMIN_WIDTH={MIN_WIDTH}\nMIN_HEIGHT={MIN_HEIGHT}\nMAX_FILE_SIZE={MAX_FILE_SIZE//1024//1024}MB\nMIN_FILE_SIZE_NO_META={MIN_FILE_SIZE_NO_META//1024//1024}MB")
 
 @client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    max_mb = MAX_FILE_SIZE // 1024
+    min_mb_no_meta = MIN_FILE_SIZE_NO_META // 1024
     await event.reply(
         f"**Video-Only Bot**\n\n"
         f"**Max video size:** {max_mb}MB\n"
@@ -115,17 +131,21 @@ async def start(event):
         f"`/listmappings`\n\n"
         f"**4. Scrape old videos:**\n"
         f"`/scrape -100123456789`\n"
-        f"Copies ALL videos ≤{max_mb}MB with 3.5s delay.\n"
+        f"Re-uploads ALL videos ≤{max_mb}MB with 3.5s delay.\n"
         f"`/scrape -100id fresh` - restart scrape from beginning\n\n"
         f"**5. Clean videos remotely:**\n"
         f"`/cleanhere -100clean_id -100trash_id`\n"
-        f"Moves videos <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash\n\n"
+        f"Moves videos if:\n"
+        f"• Duration <{MAX_DURATION}s OR\n"
+        f"• Resolution <{MIN_WIDTH}x{MIN_HEIGHT} OR\n"
+        f"• NO METADATA + File size <{min_mb_no_meta}MB\n\n"
         f"**6. Check stats:**\n"
         f"`/stats`\n\n"
         f"**7. Debug vars:**\n"
         f"`/checkvars`\n\n"
         f"**Notes:**\n"
         f"- Clean reupload: no captions, no forward tags\n"
+        f"- Preserves metadata on reupload\n"
         f"- Handles videos sent as files\n"
         f"- Uses 2x bandwidth due to reupload"
     )
@@ -220,7 +240,6 @@ async def scrape_history(event):
         await event.reply(f"Cannot access target `{target_id}`: {err}")
         return
 
-    # Check for 'fresh' flag
     force_fresh = len(args) >= 3 and args[2].lower() == 'fresh'
 
     if force_fresh:
@@ -239,19 +258,21 @@ async def scrape_history(event):
         async for message in client.iter_messages(source_id, limit=None, offset_id=offset_id, reverse=True):
             checked += 1
             if checked % 50 == 0:
-                await event.reply(f"Checked {checked} messages... Copied {count} videos so far")
+                await event.reply(f"Checked {checked} messages... Reuploaded {count} videos so far")
                 await save_checkpoint(source_id, message.id)
 
             try:
-                if message.video:
+                if is_video_message(message):
                     if message.file.size > MAX_FILE_SIZE:
                         skipped_count += 1
                         continue
 
+                    video_attr = get_video_attr(message)
                     await client.send_file(
                         target_id,
                         message.media,
                         caption="",
+                        attributes=[video_attr] if video_attr else None,
                         force_document=False
                     )
                     count += 1
@@ -269,7 +290,7 @@ async def scrape_history(event):
                 errors += 1
 
         await save_checkpoint(source_id, 0)
-        await event.reply(f"Done.\nChecked: `{checked}` messages\nVideos copied: `{count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nErrors: `{errors}`")
+        await event.reply(f"Done.\nChecked: `{checked}` messages\nVideos reuploaded: `{count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nErrors: `{errors}`")
     except Exception as e:
         await event.reply(f"Scrape failed: {e}")
 
@@ -283,7 +304,10 @@ async def clean_here(event):
         await event.reply(
             "**Usage:** `/cleanhere -100channel_to_clean -100trash_id`\n\n"
             f"Cleans any channel your userbot has access to.\n"
-            f"Moves videos <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash.\n\n"
+            f"Moves videos if:\n"
+            f"1. Duration <{MAX_DURATION}s OR\n"
+            f"2. Resolution <{MIN_WIDTH}x{MIN_HEIGHT} OR\n"
+            f"3. NO METADATA + File size <{MIN_FILE_SIZE_NO_META//1024//1024}MB\n\n"
             "Example: `/cleanhere -1001111111111 -1009999999999`"
         )
         return
@@ -305,7 +329,7 @@ async def clean_here(event):
         await event.reply(f"Cannot access trash `{trash_id}`: {err_trash}")
         return
 
-    await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nFilters: <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\nStarting in 3s...")
+    await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nFilters: <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} or NO META + <{MIN_FILE_SIZE_NO_META//1024//1024}MB\nStarting in 3s...")
     await asyncio.sleep(3)
 
     checked = 0
@@ -320,39 +344,50 @@ async def clean_here(event):
         async for message in client.iter_messages(clean_channel_id, limit=None):
             checked += 1
 
-            video_meta = None
-            if message.video:
-                video_meta = message.video
-            elif message.document:
-                for attr in message.document.attributes:
-                    if type(attr).__name__ == 'DocumentAttributeVideo':
-                        video_meta = attr
-                        break
+            video_meta = get_video_attr(message)
 
             if video_meta:
                 found_videos += 1
                 duration = getattr(video_meta, 'duration', 0)
                 width = getattr(video_meta, 'w', 0)
                 height = getattr(video_meta, 'h', 0)
+                file_size = message.file.size if message.file else 0
 
                 should_move = False
                 reason = ""
 
-                if duration and duration < MAX_DURATION:
+                # Priority 1: Duration exists and is bad
+                if duration > 0 and duration < MAX_DURATION:
                     should_move = True
                     reason = f"{duration}s < {MAX_DURATION}s"
-                elif width and height and (width < MIN_WIDTH or height < MIN_HEIGHT):
+
+                # Priority 2: Resolution exists and is bad
+                elif width > 0 and height > 0 and (width < MIN_WIDTH or height < MIN_HEIGHT):
                     should_move = True
                     reason = f"{width}x{height} < {MIN_WIDTH}x{MIN_HEIGHT}"
+
+                # Priority 3: NO usable metadata - fall back to file size
+                elif duration == 0 and (width == 0 or height == 0):
+                    if file_size < MIN_FILE_SIZE_NO_META:
+                        should_move = True
+                        reason = f"No metadata, size {file_size//1024//1024}MB < {MIN_FILE_SIZE_NO_META//1024//1024}MB"
+                    else:
+                        reason = f"No metadata but size {file_size//1024//1024}MB >= {MIN_FILE_SIZE_NO_META//1024//1024}MB - keeping"
+
                 else:
-                    if len(sample_kept) < 5:
-                        sample_kept.append(f"ID:{message.id} {duration}s {width}x{height}")
+                    reason = f"Good: {duration}s {width}x{height}"
 
                 if should_move:
                     if len(sample_moved) < 5:
-                        sample_moved.append(f"ID:{message.id} {duration}s {width}x{height} -> {reason}")
+                        sample_moved.append(f"ID:{message.id} {duration}s {width}x{height} {file_size//1024//1024}MB -> {reason}")
                     try:
-                        await client.send_file(trash_id, message.media, caption=f"From {clean_channel_id}\nReason: {reason}", force_document=False)
+                        await client.send_file(
+                            trash_id,
+                            message.media,
+                            caption=f"From {clean_channel_id}\nReason: {reason}",
+                            attributes=[video_meta],
+                            force_document=False
+                        )
                         await message.delete()
                         moved += 1
                         await asyncio.sleep(3.5)
@@ -362,6 +397,8 @@ async def clean_here(event):
                         logger.error(f"Move failed: {e}")
                         errors += 1
                 else:
+                    if len(sample_kept) < 5:
+                        sample_kept.append(f"ID:{message.id} {duration}s {width}x{height} {file_size//1024//1024}MB")
                     kept += 1
 
             if checked % 100 == 0:
@@ -382,17 +419,19 @@ async def stats(event):
 
 @client.on(events.NewMessage)
 async def auto_forward(event):
-    if event.video and str(event.chat_id) in CONFIG["sources"]:
+    if str(event.chat_id) in CONFIG["sources"] and is_video_message(event):
         target_id = int(CONFIG["sources"][str(event.chat_id)])
         try:
             if event.file.size > MAX_FILE_SIZE:
                 logger.info(f"Skipped {event.file.size/1024/1024:.1f}MB video")
                 return
 
+            video_attr = get_video_attr(event.message)
             await client.send_file(
                 target_id,
                 event.media,
                 caption="",
+                attributes=[video_attr] if video_attr else None,
                 force_document=False
             )
             logger.info(f"Re-uploaded video from {event.chat_id} to {target_id}")
