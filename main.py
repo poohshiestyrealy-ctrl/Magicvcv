@@ -3,10 +3,7 @@ import asyncio
 import logging
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
-from dotenv import load_dotenv
 from supabase import create_client, Client
-
-load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -20,7 +17,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
-client = TelegramClient.from_env('session').set_dc(2, '149.154.167.51', 443)
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CONFIG = {"sources": {}}
