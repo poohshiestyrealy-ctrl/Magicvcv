@@ -15,10 +15,10 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-MAX_FILE_SIZE = 200 * 1024 # 200MB
-MAX_DURATION = 60 # 1 minute
-MIN_WIDTH = 720 # pixels
-MIN_HEIGHT = 720 # pixels
+MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
+MAX_DURATION = 60 # seconds - videos longer than this get cleaned
+MIN_WIDTH = 100 # px - videos smaller than this get cleaned
+MIN_HEIGHT = 100 # px - videos smaller than this get cleaned
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -64,6 +64,22 @@ async def remove_mapping(source_id):
         logger.error(f"Remove failed: {e}")
         return False
 
+async def save_checkpoint(source_id, msg_id):
+    try:
+        supabase.table("scrape_progress").upsert({
+            "source_id": source_id,
+            "last_message_id": msg_id
+        }, on_conflict="source_id").execute()
+    except Exception as e:
+        logger.error(f"Checkpoint save failed: {e}")
+
+async def get_checkpoint(source_id):
+    try:
+        res = supabase.table("scrape_progress").select("last_message_id").eq("source_id", source_id).execute()
+        return res.data[0]["last_message_id"] if res.data else 0
+    except:
+        return 0
+
 async def check_access(chat_id):
     try:
         entity = await client.get_entity(chat_id)
@@ -79,7 +95,7 @@ async def check_access(chat_id):
 async def start(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
     await event.reply(
         f"**Video-Only Bot**\n\n"
         f"**Max video size:** {max_mb}MB\n"
@@ -93,9 +109,10 @@ async def start(event):
         f"`/listmappings`\n\n"
         f"**4. Scrape old videos:**\n"
         f"`/scrape -100123456789`\n"
-        f"Copies ALL videos ≤{max_mb}MB with 3.5s delay.\n\n"
-        f"**5. Clean current channel:**\n"
-        f"`/cleanhere -100trash_id`\n"
+        f"Copies ALL videos ≤{max_mb}MB with 3.5s delay.\n"
+        f"`/scrape -100id fresh` - restart scrape from beginning\n\n"
+        f"**5. Clean videos remotely:**\n"
+        f"`/cleanhere -100clean_id -100trash_id`\n"
         f"Moves videos >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash\n\n"
         f"**6. Check stats:**\n"
         f"`/stats`\n\n"
@@ -173,8 +190,8 @@ async def scrape_history(event):
     if not is_admin(event.sender_id):
         return
     args = event.text.split()
-    if len(args)!= 2:
-        await event.reply("Usage: `/scrape -100source_id`")
+    if len(args) < 2:
+        await event.reply("Usage: `/scrape -100source_id` or `/scrape -100source_id fresh`")
         return
 
     try:
@@ -188,24 +205,34 @@ async def scrape_history(event):
         return
 
     target_id = int(CONFIG["sources"][str(source_id)])
-    max_mb = MAX_FILE_SIZE // 1024 // 1024 # FIXED: was // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
 
     ok, err = await check_access(target_id)
     if not ok:
         await event.reply(f"Cannot access target `{target_id}`: {err}")
         return
 
-    await event.reply(f"Scraping ALL videos ≤{max_mb}MB from `{source_id}`...\nNo captions will be added.\n3.5s delay per video.")
+    # Check for 'fresh' flag
+    force_fresh = len(args) >= 3 and args[2].lower() == 'fresh'
+
+    if force_fresh:
+        offset_id = 0
+        await save_checkpoint(source_id, 0)
+        await event.reply(f"Force fresh scrape `{source_id}` → `{target_id}`\nStarting from oldest message.")
+    else:
+        offset_id = await get_checkpoint(source_id)
+        await event.reply(f"Scraping `{source_id}` → `{target_id}`\nResuming from message ID: `{offset_id}`\n3.5s delay per video.")
 
     count = 0
     checked = 0
     errors = 0
 
     try:
-        async for message in client.iter_messages(source_id, limit=None):
+        async for message in client.iter_messages(source_id, limit=None, offset_id=offset_id, reverse=True):
             checked += 1
             if checked % 50 == 0:
                 await event.reply(f"Checked {checked} messages... Copied {count} videos so far")
+                await save_checkpoint(source_id, message.id)
 
             try:
                 if message.video:
@@ -221,6 +248,7 @@ async def scrape_history(event):
                     )
                     count += 1
                     scraped_count += 1
+                    await save_checkpoint(source_id, message.id)
                     await asyncio.sleep(3.5)
             except FloodWaitError as e:
                 await event.reply(f"Flood wait: sleeping {e.seconds}s")
@@ -232,6 +260,7 @@ async def scrape_history(event):
                 logger.error(f"Scrape error: {e}")
                 errors += 1
 
+        await save_checkpoint(source_id, 0)
         await event.reply(f"Done.\nChecked: `{checked}` messages\nVideos copied: `{count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nErrors: `{errors}`")
     except Exception as e:
         await event.reply(f"Scrape failed: {e}")
@@ -242,38 +271,33 @@ async def clean_here(event):
         return
 
     args = event.text.split()
-    if len(args)!= 2:
+    if len(args) < 3:
         await event.reply(
-            "**Usage:** `/cleanhere -100trash_id`\n\n"
-            "Cleans the current channel you're in.\n"
-            f"Moves videos >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash channel.\n\n"
-            "Example: `/cleanhere -1009999999999`"
+            "**Usage:** `/cleanhere -100channel_to_clean -100trash_id`\n\n"
+            f"Cleans any channel your userbot has access to.\n"
+            f"Moves videos >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash.\n\n"
+            "Example: `/cleanhere -1001111111111 -1009999999999`"
         )
         return
 
     try:
-        trash_id = int(args[1])
+        clean_channel_id = int(args[1])
+        trash_id = int(args[2])
     except ValueError:
-        await event.reply("Invalid trash channel ID. Must be like `-1001234567890`")
+        await event.reply("Invalid channel IDs. Must be like `-1001234567890`")
         return
 
-    current_channel_id = event.chat_id
+    ok_clean, err_clean = await check_access(clean_channel_id)
+    if not ok_clean:
+        await event.reply(f"Cannot access channel `{clean_channel_id}`: {err_clean}")
+        return
 
     ok_trash, err_trash = await check_access(trash_id)
     if not ok_trash:
-        await event.reply(f"Cannot access trash channel `{trash_id}`: {err_trash}\nMake sure I'm in it with posting rights.")
+        await event.reply(f"Cannot access trash `{trash_id}`: {err_trash}")
         return
 
-    if not event.is_channel:
-        await event.reply("This command only works in channels, not DMs or groups.")
-        return
-
-    await event.reply(
-        f"**Cleaning this channel:** `{current_channel_id}`\n"
-        f"**Moving to trash:** `{trash_id}`\n"
-        f"**Filters:** >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\n\n"
-        f"Starting in 5s... This will delete messages."
-    )
+    await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nFilters: >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\nStarting in 5s...")
     await asyncio.sleep(5)
 
     checked = 0
@@ -282,7 +306,7 @@ async def clean_here(event):
     errors = 0
 
     try:
-        async for message in client.iter_messages(current_channel_id, limit=None):
+        async for message in client.iter_messages(clean_channel_id, limit=None):
             checked += 1
             if checked % 50 == 0:
                 await event.reply(f"Checked {checked}... Moved {moved} so far")
@@ -304,18 +328,17 @@ async def clean_here(event):
                         await client.send_file(
                             trash_id,
                             message.media,
-                            caption=f"From {current_channel_id}\nReason: {reason}",
+                            caption=f"From {clean_channel_id}\nReason: {reason}",
                             force_document=False
                         )
                         await message.delete()
                         moved += 1
-                        logger.info(f"Moved video: {reason}")
                         await asyncio.sleep(3.5)
                     except FloodWaitError as e:
                         await event.reply(f"Flood wait: sleeping {e.seconds}s")
                         await asyncio.sleep(e.seconds)
                     except ChatAdminRequiredError:
-                        await event.reply("Error: I need admin rights in THIS channel to delete messages.")
+                        await event.reply(f"Error: Need admin delete rights in `{clean_channel_id}`")
                         return
                     except Exception as e:
                         logger.error(f"Move failed: {e}")
@@ -323,16 +346,7 @@ async def clean_here(event):
                 else:
                     kept += 1
 
-        await event.reply(
-            f"**Clean done**\n"
-            f"Channel: `{current_channel_id}`\n"
-            f"Checked: `{checked}`\n"
-            f"Moved to trash: `{moved}`\n"
-            f"Kept: `{kept}`\n"
-            f"Errors: `{errors}`"
-        )
-    except ChatAdminRequiredError:
-        await event.reply("Error: I need admin rights in THIS channel to read/delete messages.")
+        await event.reply(f"**Clean done**\nChannel: `{clean_channel_id}`\nChecked: `{checked}`\nMoved: `{moved}`\nKept: `{kept}`\nErrors: `{errors}`")
     except Exception as e:
         await event.reply(f"Clean failed: {e}")
 
@@ -340,7 +354,7 @@ async def clean_here(event):
 async def stats(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024 # FIXED: was // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
     await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nMappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage)
