@@ -116,8 +116,8 @@ async def check_vars(event):
 async def start(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024
-    min_mb_no_meta = MIN_FILE_SIZE_NO_META // 1024
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    min_mb_no_meta = MIN_FILE_SIZE_NO_META // 1024 // 1024
     await event.reply(
         f"**Video-Only Bot**\n\n"
         f"**Max video size:** {max_mb}MB\n"
