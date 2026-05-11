@@ -15,7 +15,10 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
+MAX_FILE_SIZE = 200 * 1024 # 200MB
+MAX_DURATION = 60 # 1 minute
+MIN_WIDTH = 720 # pixels
+MIN_HEIGHT = 720 # pixels
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -76,7 +79,7 @@ async def check_access(chat_id):
 async def start(event):
     if not is_admin(event.sender_id):
         return
-    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    max_mb = MAX_FILE_SIZE // 1024
     await event.reply(
         f"**Video-Only Bot**\n\n"
         f"**Max video size:** {max_mb}MB\n"
@@ -91,7 +94,10 @@ async def start(event):
         f"**4. Scrape old videos:**\n"
         f"`/scrape -100123456789`\n"
         f"Copies ALL videos ≤{max_mb}MB with 3.5s delay.\n\n"
-        f"**5. Check stats:**\n"
+        f"**5. Clean current channel:**\n"
+        f"`/cleanhere -100trash_id`\n"
+        f"Moves videos >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash\n\n"
+        f"**6. Check stats:**\n"
         f"`/stats`\n\n"
         f"**Notes:**\n"
         f"- Clean reupload: no captions, no forward tags\n"
@@ -229,6 +235,106 @@ async def scrape_history(event):
         await event.reply(f"Done.\nChecked: `{checked}` messages\nVideos copied: `{count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nErrors: `{errors}`")
     except Exception as e:
         await event.reply(f"Scrape failed: {e}")
+
+@client.on(events.NewMessage(pattern='/cleanhere'))
+async def clean_here(event):
+    if not is_admin(event.sender_id):
+        return
+
+    args = event.text.split()
+    if len(args)!= 2:
+        await event.reply(
+            "**Usage:** `/cleanhere -100trash_id`\n\n"
+            "Cleans the current channel you're in.\n"
+            f"Moves videos >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash channel.\n\n"
+            "Example: `/cleanhere -1009999999999`"
+        )
+        return
+
+    try:
+        trash_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid trash channel ID. Must be like `-1001234567890`")
+        return
+
+    current_channel_id = event.chat_id
+
+    ok_trash, err_trash = await check_access(trash_id)
+    if not ok_trash:
+        await event.reply(f"Cannot access trash channel `{trash_id}`: {err_trash}\nMake sure I'm in it with posting rights.")
+        return
+
+    if not event.is_channel:
+        await event.reply("This command only works in channels, not DMs or groups.")
+        return
+
+    await event.reply(
+        f"**Cleaning this channel:** `{current_channel_id}`\n"
+        f"**Moving to trash:** `{trash_id}`\n"
+        f"**Filters:** >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\n\n"
+        f"Starting in 5s... This will delete messages."
+    )
+    await asyncio.sleep(5)
+
+    checked = 0
+    moved = 0
+    kept = 0
+    errors = 0
+
+    try:
+        async for message in client.iter_messages(current_channel_id, limit=None):
+            checked += 1
+            if checked % 50 == 0:
+                await event.reply(f"Checked {checked}... Moved {moved} so far")
+
+            if message.video:
+                should_move = False
+                reason = ""
+
+                if message.video.duration and message.video.duration > MAX_DURATION:
+                    should_move = True
+                    reason = f"{message.video.duration}s > {MAX_DURATION}s"
+
+                elif message.video.w < MIN_WIDTH or message.video.h < MIN_HEIGHT:
+                    should_move = True
+                    reason = f"{message.video.w}x{message.video.h} < {MIN_WIDTH}x{MIN_HEIGHT}"
+
+                if should_move:
+                    try:
+                        await client.send_file(
+                            trash_id,
+                            message.media,
+                            caption=f"From {current_channel_id}\nReason: {reason}",
+                            force_document=False
+                        )
+                        await message.delete()
+                        moved += 1
+                        logger.info(f"Moved video: {reason}")
+                        await asyncio.sleep(3.5)
+                    except FloodWaitError as e:
+                        await event.reply(f"Flood wait: sleeping {e.seconds}s")
+                        await asyncio.sleep(e.seconds)
+                    except ChatAdminRequiredError:
+                        await event.reply("Error: I need admin rights in THIS channel to delete messages.")
+                        return
+                    except Exception as e:
+                        logger.error(f"Move failed: {e}")
+                        errors += 1
+                else:
+                    kept += 1
+
+        await event.reply(
+            f"**Clean done**\n"
+            f"Channel: `{current_channel_id}`\n"
+            f"Checked: `{checked}`\n"
+            f"Moved to trash: `{moved}`\n"
+            f"Kept: `{kept}`\n"
+            f"Errors: `{errors}`"
+        )
+    except ChatAdminRequiredError:
+        await event.reply("Error: I need admin rights in THIS channel to read/delete messages.")
+    except Exception as e:
+        await event.reply(f"Clean failed: {e}")
 
 @client.on(events.NewMessage(pattern='/stats'))
 async def stats(event):
