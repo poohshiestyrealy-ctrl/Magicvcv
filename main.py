@@ -16,9 +16,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 MAX_FILE_SIZE = 200 * 1024 * 1024 # 200MB
-MAX_DURATION = 60 # seconds - videos longer than this get cleaned
-MIN_WIDTH = 100 # px - videos smaller than this get cleaned
-MIN_HEIGHT = 100 # px - videos smaller than this get cleaned
+MAX_DURATION = 60 # seconds - videos SHORTER than this get cleaned
+MIN_WIDTH = 1280 # px - 720p width - videos smaller than this get cleaned
+MIN_HEIGHT = 720 # px - 720p height - videos smaller than this get cleaned
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -113,7 +113,7 @@ async def start(event):
         f"`/scrape -100id fresh` - restart scrape from beginning\n\n"
         f"**5. Clean videos remotely:**\n"
         f"`/cleanhere -100clean_id -100trash_id`\n"
-        f"Moves videos >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash\n\n"
+        f"Moves videos <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash\n\n"
         f"**6. Check stats:**\n"
         f"`/stats`\n\n"
         f"**Notes:**\n"
@@ -275,7 +275,7 @@ async def clean_here(event):
         await event.reply(
             "**Usage:** `/cleanhere -100channel_to_clean -100trash_id`\n\n"
             f"Cleans any channel your userbot has access to.\n"
-            f"Moves videos >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash.\n\n"
+            f"Moves videos <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT} to trash.\n\n"
             "Example: `/cleanhere -1001111111111 -1009999999999`"
         )
         return
@@ -297,7 +297,7 @@ async def clean_here(event):
         await event.reply(f"Cannot access trash `{trash_id}`: {err_trash}")
         return
 
-    await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nFilters: >{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\nStarting in 5s...")
+    await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nFilters: <{MAX_DURATION}s or <{MIN_WIDTH}x{MIN_HEIGHT}\nStarting in 5s...")
     await asyncio.sleep(5)
 
     checked = 0
@@ -315,9 +315,9 @@ async def clean_here(event):
                 should_move = False
                 reason = ""
 
-                if message.video.duration and message.video.duration > MAX_DURATION:
+                if message.video.duration and message.video.duration < MAX_DURATION:
                     should_move = True
-                    reason = f"{message.video.duration}s > {MAX_DURATION}s"
+                    reason = f"{message.video.duration}s < {MAX_DURATION}s"
 
                 elif message.video.w < MIN_WIDTH or message.video.h < MIN_HEIGHT:
                     should_move = True
