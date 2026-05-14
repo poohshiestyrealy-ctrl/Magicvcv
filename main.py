@@ -24,7 +24,7 @@ MIN_WIDTH = 1280
 MIN_HEIGHT = 720
 MIN_FILE_SIZE_NO_META = 15 * 1024 * 1024
 UPLOAD_DELAY = 30
-DELETE_DELAY = 15
+DELETE_DELAY = 10
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -58,16 +58,6 @@ def is_video_message(message):
 
 def is_gif(message):
     return message.document and message.document.mime_type == 'video/mp4' and message.document.attributes and any(getattr(a, 'round_message', False) for a in message.document.attributes)
-
-
-
-
-
-
-
-
-
-
 
 async def load_sources():
     global CONFIG
@@ -154,8 +144,8 @@ async def start(event):
 
     msg2 = (
         f"**Auto-Forward Your Own Channels:**\n"
-        f"`/addgif -100src -100dst` - forward GIFs only\n"
-        f"`/addshort -100src -100dst` - forward ≤60s videos only\n"
+        f"`/addgif -100src -100dst` - forward GIFs, auto-delete from source\n"
+        f"`/addshort -100src -100dst` - forward 60s-120s videos, auto-delete from source\n"
         f"`/listmappings`\n`/stats`\n`/checkvars`"
     )
 
@@ -203,7 +193,7 @@ async def add_gif(event):
     try:
         supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "gif"}, on_conflict="source_id").execute()
         CONFIG["auto_gif"][str(source_id)] = str(target_id)
-        await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`")
+        await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
@@ -224,9 +214,14 @@ async def add_short(event):
     try:
         supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "short"}, on_conflict="source_id").execute()
         CONFIG["auto_short"][str(source_id)] = str(target_id)
-        await event.reply(f"Added 60s auto-forward: `{source_id}` → `{target_id}`")
+        await event.reply(f"Added 60s-120s auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
     except Exception as e:
         await event.reply(f"Failed: {e}")
+
+
+
+
+
 
 
 
@@ -274,7 +269,7 @@ async def list_mappings(event):
             msg += f"`{src}` → `{dst}` [GIF]\n"
     if CONFIG["auto_short"]:
         for src, dst in CONFIG["auto_short"].items():
-            msg += f"`{src}` → `{dst}` [60s]\n"
+            msg += f"`{src}` → `{dst}` [60s-120s]\n"
     if not CONFIG["auto_gif"] and not CONFIG["auto_short"]:
         msg += "None\n"
 
@@ -364,7 +359,7 @@ async def clean_here(event):
                 found_videos += 1
                 duration = getattr(video_meta, 'duration', 0)
                 width = getattr(video_meta, 'w', 0)
-                height = getattr(video_meta, 'h', 0)
+                height = getattr(video_meta, 'w', 0)
                 file_size = message.file.size if message.file else 0
                 should_move = False
                 if duration > 0 and duration < MAX_DURATION:
@@ -408,21 +403,34 @@ async def stats(event):
 async def auto_forward(event):
     src = str(event.chat_id)
 
+    # Auto-forward GIFs and delete from source
     if src in CONFIG["auto_gif"] and is_gif(event):
         target_id = int(CONFIG["auto_gif"][src])
         await client.forward_messages(target_id, event.message, event.chat_id)
-        await asyncio.sleep(2)
+        try:
+            await event.delete()
+            await asyncio.sleep(DELETE_DELAY)
+        except Exception as e:
+            await send_log(f"Delete failed for GIF {event.id}: {e}")
+        await asyncio.sleep(10)
         return
 
+    # Auto-forward 60s-120s videos and delete from source
     if src in CONFIG["auto_short"] and is_video_message(event):
         video_attr = get_video_attr(event.message)
         duration = getattr(video_attr, 'duration', 0)
-        if 0 < duration <= 60:
+        if 60 < duration <= 120:
             target_id = int(CONFIG["auto_short"][src])
             await client.forward_messages(target_id, event.message, event.chat_id)
-            await asyncio.sleep(2)
+            try:
+                await event.delete()
+                await asyncio.sleep(DELETE_DELAY)
+            except Exception as e:
+                await send_log(f"Delete failed for video {event.id}: {e}")
+            await asyncio.sleep(10)
         return
 
+    # Auto-scrape for mapped sources - no delete here
     if src in CONFIG["sources"] and is_video_message(event):
         target_id = int(CONFIG["sources"][src])
         try:
