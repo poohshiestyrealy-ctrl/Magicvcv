@@ -483,7 +483,7 @@ async def clean_here(event):
                 found_videos += 1
                 duration = getattr(video_meta, 'duration', 0)
                 width = getattr(video_meta, 'w', 0)
-                height = getattr(video_meta, 'h', 0)
+                height = getattr(video_meta, 'w', 0)
                 file_size = message.file.size if message.file else 0
                 should_move = False
                 if duration > 0 and duration < MAX_DURATION:
