@@ -1,15 +1,13 @@
 import os
 import asyncio
 import logging
-import json
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
 from telethon.tl.types import (
     DocumentAttributeVideo,
     DocumentAttributeAnimated,
-    InputMessagesFilterAnimation,
-    InputMessagesFilterVideo
+    InputMessagesFilterPhotosVideos
 )
 from supabase import create_client, Client
 
@@ -161,6 +159,9 @@ async def check_access(chat_id):
 
 
 
+
+
+
 @client.on(events.NewMessage(pattern='/checkvars'))
 async def check_vars(event):
     if not is_admin(event.sender_id):
@@ -238,7 +239,7 @@ async def add_gif(event):
         current_delay = UPLOAD_DELAY
         status_msg = await event.reply("Backfill started.")
 
-        async for msg in client.iter_messages(source_id, filter=InputMessagesFilterAnimation, limit=None, offset_id=offset_id, reverse=True):
+        async for msg in client.iter_messages(source_id, filter=InputMessagesFilterPhotosVideos, limit=None, offset_id=offset_id, reverse=True):
             if not is_gif(msg):
                 continue
             try:
@@ -313,7 +314,7 @@ async def add_short(event):
         current_delay = UPLOAD_DELAY
         status_msg = await event.reply("Backfill started.")
 
-        async for msg in client.iter_messages(source_id, filter=InputMessagesFilterVideo, limit=None, offset_id=offset_id, reverse=True):
+        async for msg in client.iter_messages(source_id, filter=InputMessagesFilterPhotosVideos, limit=None, offset_id=offset_id, reverse=True):
             if not is_short_video(msg):
                 continue
             try:
@@ -560,7 +561,7 @@ async def auto_forward(event):
             if event.file.size > MAX_FILE_SIZE:
                 return
             video_attr = get_video_attr(event.message)
-            await client.send_file(target_id, message.media, caption="", attributes=[video_attr] if video_attr else None, force_document=False)
+            await client.send_file(target_id, event.media, caption="", attributes=[video_attr] if video_attr else None, force_document=False)
             await asyncio.sleep(UPLOAD_DELAY)
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
@@ -576,14 +577,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
