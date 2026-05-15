@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAnimated
 from telethon.tl.functions.messages import SearchRequest
 from supabase import create_client, Client
@@ -13,16 +14,19 @@ logger = logging.getLogger(__name__)
 # Env vars
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+SESSION_STRING = os.getenv("SESSION_STRING")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-client = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# Userbot login with session string
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+client.start()
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
-    await event.reply("Bot is running. Use /addsource, /scrape, /addgif, /addshort")
+    await event.reply("Userbot is running. Use /addsource, /scrape, /addgif, /addshort")
 
 @client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
@@ -43,6 +47,10 @@ async def add_source(event):
     except Exception as e:
         logger.error(e)
         await event.reply(f"Error: {e}")
+
+
+
+
 
 
 
@@ -114,5 +122,5 @@ async def add_short(event):
     await event.reply("Shorts auto-posting started. Use /stop to stop.")
     # Add your auto-posting logic here
 
-logger.info("Bot started")
+logger.info("Userbot started")
 client.run_until_disconnected()
