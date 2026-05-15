@@ -163,8 +163,6 @@ async def check_access(chat_id):
 
 
 
-
-
 @client.on(events.NewMessage(pattern='/checkvars'))
 async def check_vars(event):
     if not is_admin(event.sender_id):
@@ -453,3 +451,130 @@ async def scrape_history(event):
                     video_attr = get_video_attr(message)
                     await client.send_file(target_id, message.media, caption="", attributes=[video_attr] if video_attr else None, force_document=False)
                     count += 1
+                    scraped_count += 1
+                    await save_checkpoint(source_id, message.id)
+                    await asyncio.sleep(current_delay)
+            except FloodWaitError as e:
+                await asyncio.sleep(e.seconds)
+                current_delay = min(current_delay * 1.5, 60)
+            except Exception as e:
+                errors += 1
+        await save_checkpoint(source_id, 0)
+        final = f"**Done**\nChecked: `{checked}`\nUploaded: `{count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nErrors: `{errors}`"
+        await status_msg.edit(final)
+    except Exception as e:
+        await event.reply(f"Scrape failed: {e}")
+
+@client.on(events.NewMessage(pattern='/cleanhere'))
+async def clean_here(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args) < 3:
+        await event.reply("**Usage:** `/cleanhere -100clean_id -100trash_id`")
+        return
+    try:
+        clean_channel_id = int(args[1])
+        trash_id = int(args[2])
+    except ValueError:
+        await event.reply("Invalid channel IDs")
+        return
+    status_msg = await event.reply(f"Cleaning `{clean_channel_id}` → `{trash_id}`\nDelay: {UPLOAD_DELAY}s")
+    checked = found_videos = moved = kept = errors = 0
+    current_delay = UPLOAD_DELAY
+    try:
+        async for message in client.iter_messages(clean_channel_id, limit=None):
+            checked += 1
+            video_meta = get_video_attr(message)
+            if video_meta:
+                found_videos += 1
+                duration = getattr(video_meta, 'duration', 0)
+                width = getattr(video_meta, 'w', 0)
+                height = getattr(video_meta, 'h', 0)
+                file_size = message.file.size if message.file else 0
+                should_move = False
+                if duration > 0 and duration < MAX_DURATION:
+                    should_move = True
+                elif width > 0 and height > 0 and (width < MIN_WIDTH or height < MIN_HEIGHT):
+                    should_move = True
+                elif duration == 0 and (width == 0 or height == 0):
+                    if file_size == 0 or file_size < MIN_FILE_SIZE_NO_META:
+                        should_move = True
+                if should_move:
+                    try:
+                        await client.send_file(trash_id, message.media, caption="", attributes=[video_meta], force_document=False)
+                        await message.delete()
+                        moved += 1
+                        await asyncio.sleep(current_delay)
+                    except FloodWaitError as e:
+                        await asyncio.sleep(e.seconds)
+                        current_delay = min(current_delay * 1.5, 60)
+                    except Exception as e:
+                        errors += 1
+                else:
+                    kept += 1
+            if checked % 500 == 0:
+                try:
+                    await status_msg.edit(f"Checked {checked}... Videos: {found_videos}... Moved: {moved}... Errors: {errors}")
+                except:
+                    pass
+        final = f"**Clean done**\nChecked: `{checked}`\nVideos: `{found_videos}`\nMoved: `{moved}`\nKept: `{kept}`\nErrors: `{errors}`"
+        await status_msg.edit(final)
+    except Exception as e:
+        await event.reply(f"Clean failed: {e}")
+
+@client.on(events.NewMessage(pattern='/stats'))
+async def stats(event):
+    if not is_admin(event.sender_id):
+        return
+    max_mb = MAX_FILE_SIZE // 1024 // 1024
+    await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nScrape mappings: `{len(CONFIG['sources'])}`\nGIF mappings: `{len(CONFIG['auto_gif'])}`\nShort mappings: `{len(CONFIG['auto_short'])}`")
+
+@client.on(events.NewMessage)
+async def auto_forward(event):
+    src = str(event.chat_id)
+
+    if src in CONFIG["auto_gif"] and is_gif(event):
+        target_id = int(CONFIG["auto_gif"][src])
+        await client.forward_messages(target_id, event.message, event.chat_id)
+        try:
+            await event.delete()
+            await asyncio.sleep(DELETE_DELAY)
+        except Exception as e:
+            await send_log(f"Delete failed for GIF {event.id}: {e}")
+        await asyncio.sleep(10)
+        return
+
+    if src in CONFIG["auto_short"] and is_short_video(event):
+        target_id = int(CONFIG["auto_short"][src])
+        await client.forward_messages(target_id, event.message, event.chat_id)
+        try:
+            await event.delete()
+            await asyncio.sleep(DELETE_DELAY)
+        except Exception as e:
+            await send_log(f"Delete failed for video {event.id}: {e}")
+        await asyncio.sleep(10)
+        return
+
+    if src in CONFIG["sources"] and is_video_message(event):
+        target_id = int(CONFIG["sources"][src])
+        try:
+            if event.file.size > MAX_FILE_SIZE:
+                return
+            video_attr = get_video_attr(event.message)
+            await client.send_file(target_id, event.media, caption="", attributes=[video_attr] if video_attr else None, force_document=False)
+            await asyncio.sleep(UPLOAD_DELAY)
+        except FloodWaitError as e:
+            await asyncio.sleep(e.seconds)
+        except Exception as e:
+            await send_log(f"Auto forward failed {event.chat_id}: {e}")
+
+async def main():
+    await load_sources()
+    await client.start()
+    me = await client.get_me()
+    await send_log(f"Bot started as {me.first_name}")
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    asyncio.run(main())
