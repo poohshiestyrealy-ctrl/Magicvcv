@@ -145,8 +145,12 @@ async def start(event):
 
     msg2 = (
         f"**Auto-Forward Your Own Channels:**\n"
-        f"`/addgif -100src -100dst` - forward GIFs, auto-delete from source\n"
-        f"`/addshort -100src -100dst` - forward 60s-120s videos, auto-delete from source\n"
+        f"`/addgif -100src -100dst`\n"
+        f"`/removegif -100src`\n"
+        f"`/scrapegif -100src`\n"
+        f"`/addshort -100src -100dst`\n"
+        f"`/removeshort -100src`\n"
+        f"`/scrapeshort -100src`\n"
         f"`/listmappings`\n`/stats`\n`/checkvars`"
     )
 
@@ -177,12 +181,26 @@ async def add_source(event):
     else:
         await event.reply("Failed to save")
 
-
-
-
-
-
-
+@client.on(events.NewMessage(pattern='/removesource'))
+async def remove_source(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args)!= 2:
+        await event.reply("Usage: `/removesource -100source_id`")
+        return
+    try:
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID")
+        return
+    if str(source_id) not in CONFIG["sources"]:
+        await event.reply("Source not mapped")
+        return
+    if await remove_mapping(source_id):
+        await event.reply(f"Removed `{source_id}`")
+    else:
+        await event.reply("Failed to remove")
 
 @client.on(events.NewMessage(pattern='/addgif'))
 async def add_gif(event):
@@ -202,6 +220,29 @@ async def add_gif(event):
         supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "gif"}, on_conflict="source_id").execute()
         CONFIG["auto_gif"][str(source_id)] = str(target_id)
         await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
+
+@client.on(events.NewMessage(pattern='/removegif'))
+async def remove_gif(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args)!= 2:
+        await event.reply("Usage: `/removegif -100source_id`")
+        return
+    try:
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID")
+        return
+    if str(source_id) not in CONFIG["auto_gif"]:
+        await event.reply("GIF mapping not found")
+        return
+    try:
+        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "gif").execute()
+        CONFIG["auto_gif"].pop(str(source_id), None)
+        await event.reply(f"Removed GIF mapping for `{source_id}`")
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
@@ -226,26 +267,35 @@ async def add_short(event):
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
-@client.on(events.NewMessage(pattern='/removesource'))
-async def remove_source(event):
+@client.on(events.NewMessage(pattern='/removeshort'))
+async def remove_short(event):
     if not is_admin(event.sender_id):
         return
     args = event.text.split()
     if len(args)!= 2:
-        await event.reply("Usage: `/removesource -100source_id`")
+        await event.reply("Usage: `/removeshort -100source_id`")
         return
     try:
         source_id = int(args[1])
     except ValueError:
         await event.reply("Invalid source ID")
         return
-    if str(source_id) not in CONFIG["sources"]:
-        await event.reply("Source not mapped")
+    if str(source_id) not in CONFIG["auto_short"]:
+        await event.reply("Short mapping not found")
         return
-    if await remove_mapping(source_id):
-        await event.reply(f"Removed `{source_id}`")
-    else:
-        await event.reply("Failed to remove")
+    try:
+        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "short").execute()
+        CONFIG["auto_short"].pop(str(source_id), None)
+        await event.reply(f"Removed short mapping for `{source_id}`")
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
+
+
+
+
+
+
+
 
 @client.on(events.NewMessage(pattern='/listmappings'))
 async def list_mappings(event):
@@ -326,6 +376,95 @@ async def scrape_history(event):
         await save_checkpoint(source_id, 0)
         final = f"**Done**\nChecked: `{checked}`\nUploaded: `{count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nErrors: `{errors}`"
         await status_msg.edit(final)
+    except Exception as e:
+        await event.reply(f"Scrape failed: {e}")
+
+@client.on(events.NewMessage(pattern='/scrapegif'))
+async def scrape_gif_history(event):
+    global scraped_count, skipped_count
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args) < 2:
+        await event.reply("Usage: `/scrapegif -100source_id`")
+        return
+    try:
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID")
+        return
+    if str(source_id) not in CONFIG["auto_gif"]:
+        await event.reply("Source not mapped for GIFs. Use `/addgif` first")
+        return
+    target_id = int(CONFIG["auto_gif"][str(source_id)])
+
+    status_msg = await event.reply(f"Scraping GIFs from `{source_id}` → `{target_id}`\nDelay: {UPLOAD_DELAY}s")
+    count = checked = errors = 0
+
+    try:
+        async for message in client.iter_messages(source_id, limit=None, reverse=True):
+            checked += 1
+            if checked % 500 == 0:
+                await status_msg.edit(f"Checked {checked}... Forwarded {count}... Errors {errors}")
+
+            if is_gif(message):
+                try:
+                    await client.forward_messages(target_id, message, source_id)
+                    count += 1
+                    scraped_count += 1
+                    await asyncio.sleep(UPLOAD_DELAY)
+                except FloodWaitError as e:
+                    await asyncio.sleep(e.seconds)
+                except Exception:
+                    errors += 1
+
+        await status_msg.edit(f"**GIF scrape done**\nChecked: `{checked}`\nForwarded: `{count}`\nErrors: `{errors}`")
+    except Exception as e:
+        await event.reply(f"Scrape failed: {e}")
+
+@client.on(events.NewMessage(pattern='/scrapeshort'))
+async def scrape_short_history(event):
+    global scraped_count, skipped_count
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args) < 2:
+        await event.reply("Usage: `/scrapeshort -100source_id`")
+        return
+    try:
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID")
+        return
+    if str(source_id) not in CONFIG["auto_short"]:
+        await event.reply("Source not mapped for shorts. Use `/addshort` first")
+        return
+    target_id = int(CONFIG["auto_short"][str(source_id)])
+
+    status_msg = await event.reply(f"Scraping 60-120s videos from `{source_id}` → `{target_id}`\nDelay: {UPLOAD_DELAY}s")
+    count = checked = errors = 0
+
+    try:
+        async for message in client.iter_messages(source_id, limit=None, reverse=True):
+            checked += 1
+            if checked % 500 == 0:
+                await status_msg.edit(f"Checked {checked}... Forwarded {count}... Errors {errors}")
+
+            if is_video_message(message):
+                video_attr = get_video_attr(message)
+                duration = getattr(video_attr, 'duration', 0)
+                if 60 < duration <= 120:
+                    try:
+                        await client.forward_messages(target_id, message, source_id)
+                        count += 1
+                        scraped_count += 1
+                        await asyncio.sleep(UPLOAD_DELAY)
+                    except FloodWaitError as e:
+                        await asyncio.sleep(e.seconds)
+                    except Exception:
+                        errors += 1
+
+        await status_msg.edit(f"**Short scrape done**\nChecked: `{checked}`\nForwarded: `{count}`\nErrors: `{errors}`")
     except Exception as e:
         await event.reply(f"Scrape failed: {e}")
 
