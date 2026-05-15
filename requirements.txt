@@ -1,3 +1,3 @@
-telethon==1.36.0
+telethon==1.36.0 --no-cache-dir
 supabase==2.9.1
 psutil==5.9.8
