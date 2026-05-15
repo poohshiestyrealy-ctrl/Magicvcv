@@ -1,10 +1,16 @@
 import os
 import asyncio
 import logging
+import json
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
-from telethon.tl.types import DocumentAttributeVideo
+from telethon.tl.types import (
+    DocumentAttributeVideo,
+    DocumentAttributeAnimated,
+    InputMessagesFilterAnimation,
+    InputMessagesFilterVideo
+)
 from supabase import create_client, Client
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,7 +63,16 @@ def is_video_message(message):
     return get_video_attr(message) is not None
 
 def is_gif(message):
-    return message.document and message.document.mime_type == 'video/mp4' and message.document.attributes and any(getattr(a, 'round_message', False) for a in message.document.attributes)
+    if not message.document or message.document.mime_type!= 'video/mp4':
+        return False
+    return any(isinstance(a, DocumentAttributeAnimated) for a in message.document.attributes)
+
+def is_short_video(message):
+    video_attr = get_video_attr(message)
+    if not video_attr:
+        return False
+    duration = getattr(video_attr, 'duration', 0)
+    return 60 < duration <= 120
 
 async def load_sources():
     global CONFIG
@@ -110,6 +125,24 @@ async def get_checkpoint(source_id):
     except:
         return 0
 
+async def save_auto_checkpoint(source_id, mode, msg_id):
+    try:
+        supabase.table("auto_progress").upsert({
+            "source_id": source_id,
+            "mode": mode,
+            "last_message_id": msg_id,
+            "updated_at": "now()"
+        }, on_conflict="source_id,mode").execute()
+    except Exception as e:
+        logger.error(f"Auto checkpoint save failed: {e}")
+
+async def get_auto_checkpoint(source_id, mode):
+    try:
+        res = supabase.table("auto_progress").select("last_message_id").eq("source_id", source_id).eq("mode", mode).execute()
+        return res.data[0]["last_message_id"] if res.data else 0
+    except:
+        return 0
+
 async def check_access(chat_id):
     try:
         entity = await client.get_entity(chat_id)
@@ -121,6 +154,13 @@ async def check_access(chat_id):
     except Exception as e:
         return False, str(e)
 
+
+
+
+
+
+
+
 @client.on(events.NewMessage(pattern='/checkvars'))
 async def check_vars(event):
     if not is_admin(event.sender_id):
@@ -131,27 +171,21 @@ async def check_vars(event):
 async def start(event):
     if not is_admin(event.sender_id):
         return
-
-    msg1 = (
-        f"**Video-Only Bot - SAFE MODE**\n\n"
-        f"**Delays:** Upload {UPLOAD_DELAY}s | Delete {DELETE_DELAY}s\n"
-        f"**Scraping Channels You Don't Own:**\n"
-        f"`/addsource -100src -100dst`\n"
-        f"`/removesource -100src`\n"
-        f"`/scrape -100src` or `/scrape -100src fresh`\n"
-        f"`/cleanhere -100clean -100trash`"
+    msg = (
+        "**Video-Only Bot**\n\n"
+        "**Scrape:**\n"
+        "`/addsource -100src -100dst`\n"
+        "`/removesource -100src`\n"
+        "`/scrape -100src` or `/scrape -100src fresh`\n"
+        "`/cleanhere -100clean -100trash`\n\n"
+        "**Auto-Forward:**\n"
+        "`/addgif -100src -100dst` - GIFs, auto-delete, full history backfill\n"
+        "`/removegif -100src`\n"
+        "`/addshort -100src -100dst` - 60-120s videos, auto-delete, full history backfill\n"
+        "`/removeshort -100src`\n\n"
+        "`/listmappings`\n`/stats`\n`/checkvars`"
     )
-
-    msg2 = (
-        f"**Auto-Forward Your Own Channels:**\n"
-        f"`/addgif -100src -100dst` - forward GIFs, auto-delete from source\n"
-        f"`/addshort -100src -100dst` - forward 60s-120s videos, auto-delete from source\n"
-        f"`/listmappings`\n`/stats`\n`/checkvars`"
-    )
-
-    await event.reply(msg1)
-    await asyncio.sleep(0.5)
-    await event.reply(msg2)
+    await event.reply(msg)
 
 @client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
@@ -190,10 +224,64 @@ async def add_gif(event):
     except ValueError:
         await event.reply("IDs must be numbers")
         return
+
     try:
         supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "gif"}, on_conflict="source_id").execute()
         CONFIG["auto_gif"][str(source_id)] = str(target_id)
         await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
+
+        offset_id = await get_auto_checkpoint(source_id, "gif")
+        await event.reply(f"Scraping old GIFs from ID `{offset_id}`... Safe delays enabled.")
+
+        count = 0
+        errors = 0
+        current_delay = UPLOAD_DELAY
+        status_msg = await event.reply("Backfill started.")
+
+        async for msg in client.iter_messages(source_id, filter=InputMessagesFilterAnimation, limit=None, offset_id=offset_id, reverse=True):
+            if not is_gif(msg):
+                continue
+            try:
+                await client.send_file(target_id, msg)
+                count += 1
+                await save_auto_checkpoint(source_id, "gif", msg.id)
+
+                if count % 50 == 0:
+                    await status_msg.edit(f"Backfill running... `{count}` GIFs forwarded. Errors: `{errors}`")
+
+                await asyncio.sleep(current_delay)
+
+            except FloodWaitError as e:
+                await status_msg.edit(f"Hit FloodWait. Sleeping `{e.seconds}`s...")
+                await asyncio.sleep(e.seconds)
+                current_delay = min(current_delay * 1.5, 60)
+            except Exception as e:
+                errors += 1
+                await asyncio.sleep(5)
+
+        await save_auto_checkpoint(source_id, "gif", 0)
+        await status_msg.edit(f"**Backfill done**\nForwarded: `{count}` GIFs\nErrors: `{errors}`")
+
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
+
+@client.on(events.NewMessage(pattern='/removegif'))
+async def remove_gif(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args)!= 2:
+        await event.reply("Usage: `/removegif -100source_id`")
+        return
+    try:
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID")
+        return
+    try:
+        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "gif").execute()
+        CONFIG["auto_gif"].pop(str(source_id), None)
+        await event.reply(f"Removed GIF auto-forward for `{source_id}`")
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
@@ -211,25 +299,66 @@ async def add_short(event):
     except ValueError:
         await event.reply("IDs must be numbers")
         return
+
     try:
         supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "short"}, on_conflict="source_id").execute()
         CONFIG["auto_short"][str(source_id)] = str(target_id)
         await event.reply(f"Added 60s-120s auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
+
+        offset_id = await get_auto_checkpoint(source_id, "short")
+        await event.reply(f"Scraping old shorts from ID `{offset_id}`... Safe delays enabled.")
+
+        count = 0
+        errors = 0
+        current_delay = UPLOAD_DELAY
+        status_msg = await event.reply("Backfill started.")
+
+        async for msg in client.iter_messages(source_id, filter=InputMessagesFilterVideo, limit=None, offset_id=offset_id, reverse=True):
+            if not is_short_video(msg):
+                continue
+            try:
+                await client.send_file(target_id, msg)
+                count += 1
+                await save_auto_checkpoint(source_id, "short", msg.id)
+
+                if count % 50 == 0:
+                    await status_msg.edit(f"Backfill running... `{count}` shorts forwarded. Errors: `{errors}`")
+
+                await asyncio.sleep(current_delay)
+
+            except FloodWaitError as e:
+                await status_msg.edit(f"Hit FloodWait. Sleeping `{e.seconds}`s...")
+                await asyncio.sleep(e.seconds)
+                current_delay = min(current_delay * 1.5, 60)
+            except Exception as e:
+                errors += 1
+                await asyncio.sleep(5)
+
+        await save_auto_checkpoint(source_id, "short", 0)
+        await status_msg.edit(f"**Backfill done**\nForwarded: `{count}` shorts\nErrors: `{errors}`")
+
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
-
-
-
-
-
-
-
-
-
-
-
-
+@client.on(events.NewMessage(pattern='/removeshort'))
+async def remove_short(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    if len(args)!= 2:
+        await event.reply("Usage: `/removeshort -100source_id`")
+        return
+    try:
+        source_id = int(args[1])
+    except ValueError:
+        await event.reply("Invalid source ID")
+        return
+    try:
+        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "short").execute()
+        CONFIG["auto_short"].pop(str(source_id), None)
+        await event.reply(f"Removed short auto-forward for `{source_id}`")
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
 
 @client.on(events.NewMessage(pattern='/removesource'))
 async def remove_source(event):
@@ -359,7 +488,7 @@ async def clean_here(event):
                 found_videos += 1
                 duration = getattr(video_meta, 'duration', 0)
                 width = getattr(video_meta, 'w', 0)
-                height = getattr(video_meta, 'w', 0)
+                height = getattr(video_meta, 'h', 0)
                 file_size = message.file.size if message.file else 0
                 should_move = False
                 if duration > 0 and duration < MAX_DURATION:
@@ -403,7 +532,6 @@ async def stats(event):
 async def auto_forward(event):
     src = str(event.chat_id)
 
-    # Auto-forward GIFs and delete from source
     if src in CONFIG["auto_gif"] and is_gif(event):
         target_id = int(CONFIG["auto_gif"][src])
         await client.forward_messages(target_id, event.message, event.chat_id)
@@ -415,29 +543,24 @@ async def auto_forward(event):
         await asyncio.sleep(10)
         return
 
-    # Auto-forward 60s-120s videos and delete from source
-    if src in CONFIG["auto_short"] and is_video_message(event):
-        video_attr = get_video_attr(event.message)
-        duration = getattr(video_attr, 'duration', 0)
-        if 60 < duration <= 120:
-            target_id = int(CONFIG["auto_short"][src])
-            await client.forward_messages(target_id, event.message, event.chat_id)
-            try:
-                await event.delete()
-                await asyncio.sleep(DELETE_DELAY)
-            except Exception as e:
-                await send_log(f"Delete failed for video {event.id}: {e}")
-            await asyncio.sleep(10)
+    if src in CONFIG["auto_short"] and is_short_video(event):
+        target_id = int(CONFIG["auto_short"][src])
+        await client.forward_messages(target_id, event.message, event.chat_id)
+        try:
+            await event.delete()
+            await asyncio.sleep(DELETE_DELAY)
+        except Exception as e:
+            await send_log(f"Delete failed for video {event.id}: {e}")
+        await asyncio.sleep(10)
         return
 
-    # Auto-scrape for mapped sources - no delete here
     if src in CONFIG["sources"] and is_video_message(event):
         target_id = int(CONFIG["sources"][src])
         try:
             if event.file.size > MAX_FILE_SIZE:
                 return
             video_attr = get_video_attr(event.message)
-            await client.send_file(target_id, event.media, caption="", attributes=[video_attr] if video_attr else None, force_document=False)
+            await client.send_file(target_id, message.media, caption="", attributes=[video_attr] if video_attr else None, force_document=False)
             await asyncio.sleep(UPLOAD_DELAY)
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
@@ -453,3 +576,14 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+
+
+
+
+
+
+
+
