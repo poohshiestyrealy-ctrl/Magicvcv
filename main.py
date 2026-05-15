@@ -140,7 +140,8 @@ async def start(event):
         f"`/addsource -100src -100dst`\n"
         f"`/removesource -100src`\n"
         f"`/scrape -100src` or `/scrape -100src fresh`\n"
-        f"`/cleanhere -100clean -100trash`"
+        f"`/cleanhere -100clean -100trash`\n\n"
+        f"**Note:** Restart bot after adding any mapping"
     )
 
     msg2 = (
@@ -177,7 +178,7 @@ async def add_source(event):
         await event.reply(f"Cannot access target `{target_id}`: {err}")
         return
     if await save_mapping(source_id, target_id):
-        await event.reply(f"Added scrape mapping: `{source_id}` → `{target_id}`")
+        await event.reply(f"Added scrape mapping: `{source_id}` → `{target_id}`\nRestart bot to apply")
     else:
         await event.reply("Failed to save")
 
@@ -219,7 +220,7 @@ async def add_gif(event):
     try:
         supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "gif"}, on_conflict="source_id").execute()
         CONFIG["auto_gif"][str(source_id)] = str(target_id)
-        await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
+        await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled\nRestart bot to apply")
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
@@ -263,7 +264,7 @@ async def add_short(event):
     try:
         supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "short"}, on_conflict="source_id").execute()
         CONFIG["auto_short"][str(source_id)] = str(target_id)
-        await event.reply(f"Added 60s-120s auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
+        await event.reply(f"Added 60s-120s auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled\nRestart bot to apply")
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
@@ -289,6 +290,9 @@ async def remove_short(event):
         await event.reply(f"Removed short mapping for `{source_id}`")
     except Exception as e:
         await event.reply(f"Failed: {e}")
+
+
+
 
 
 
@@ -335,7 +339,7 @@ async def scrape_history(event):
         await event.reply("Invalid source ID")
         return
     if str(source_id) not in CONFIG["sources"]:
-        await event.reply("Source not mapped. Use `/addsource` first")
+        await event.reply("Source not mapped. Use `/addsource` first and restart bot")
         return
     target_id = int(CONFIG["sources"][str(source_id)])
     max_mb = MAX_FILE_SIZE // 1024 // 1024
@@ -394,7 +398,7 @@ async def scrape_gif_history(event):
         await event.reply("Invalid source ID")
         return
     if str(source_id) not in CONFIG["auto_gif"]:
-        await event.reply("Source not mapped for GIFs. Use `/addgif` first")
+        await event.reply("Source not mapped for GIFs. Use `/addgif` first and restart bot")
         return
     target_id = int(CONFIG["auto_gif"][str(source_id)])
 
@@ -437,7 +441,7 @@ async def scrape_short_history(event):
         await event.reply("Invalid source ID")
         return
     if str(source_id) not in CONFIG["auto_short"]:
-        await event.reply("Source not mapped for shorts. Use `/addshort` first")
+        await event.reply("Source not mapped for shorts. Use `/addshort` first and restart bot")
         return
     target_id = int(CONFIG["auto_short"][str(source_id)])
 
