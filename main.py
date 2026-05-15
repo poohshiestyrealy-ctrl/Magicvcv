@@ -4,11 +4,8 @@ import logging
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
-from telethon.tl.types import (
-    DocumentAttributeVideo,
-    DocumentAttributeAnimated,
-    InputMessagesFilterPhotosVideos
-)
+from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAnimated
+from telethon.tl.types.messages import InputMessagesFilterPhotosVideos
 from supabase import create_client, Client
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -151,6 +148,10 @@ async def check_access(chat_id):
         return False, "Invalid object ID for a chat"
     except Exception as e:
         return False, str(e)
+
+
+
+
 
 
 
