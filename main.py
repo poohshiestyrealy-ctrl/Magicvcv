@@ -253,7 +253,8 @@ async def resync_group_topics(event):
     await msg.edit(f"**Resync Complete**\nAdded {created} new topic(s).\nTotal mapped: {len(topic_map)}")
 
 
-@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))   # ← Fixed with raw string 'r'
+@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))
+async def scrape_group_like_fixed(event):   # ← Fixed with raw string 'r'
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
