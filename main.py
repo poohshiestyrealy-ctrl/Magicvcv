@@ -30,8 +30,13 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CONFIG = {"sources": {}, "auto_gif": {}, "auto_short": {}}
+mapped_chats = set()
 scraped_count = 0
 skipped_count = 0
+
+def rebuild_mapped_chats():
+    global mapped_chats
+    mapped_chats = set(CONFIG["sources"].keys()) | set(CONFIG["auto_gif"].keys()) | set(CONFIG["auto_short"].keys())
 
 async def send_log(text):
     if BOT_LOG_CHAT_ID!= 0:
@@ -76,6 +81,7 @@ async def load_sources():
             elif row["mode"] == "short":
                 CONFIG["auto_short"][src] = str(row["target_id"])
 
+        rebuild_mapped_chats()
         await send_log(f"Loaded {len(CONFIG['sources'])} scrape, {len(CONFIG['auto_gif'])} GIF, {len(CONFIG['auto_short'])} short mappings")
     except Exception as e:
         await send_log(f"Failed to load sources: {e}")
@@ -84,6 +90,7 @@ async def save_mapping(source_id, target_id):
     try:
         supabase.table("mappings").upsert({"source_id": source_id, "target_id": target_id}, on_conflict="source_id").execute()
         CONFIG["sources"][str(source_id)] = str(target_id)
+        rebuild_mapped_chats()
         return True
     except Exception as e:
         await send_log(f"Save failed: {e}")
@@ -93,6 +100,7 @@ async def remove_mapping(source_id):
     try:
         supabase.table("mappings").delete().eq("source_id", source_id).execute()
         CONFIG["sources"].pop(str(source_id), None)
+        rebuild_mapped_chats()
         return True
     except Exception as e:
         await send_log(f"Remove failed: {e}")
@@ -114,13 +122,24 @@ async def get_checkpoint(source_id):
 async def check_access(chat_id):
     try:
         entity = await client.get_entity(chat_id)
-        if hasattr(entity, 'broadcast') or hasattr(entity, 'megagroup'):
+        if hasattr(entity, 'broadcast') or hasattr(entity, 'megagroup') or hasattr(entity, 'participants_count'):
             return True, None
-        return False, "Not a channel/supergroup"
+        return False, "Not a chat/channel/supergroup"
     except ValueError:
         return False, "Invalid object ID for a chat"
     except Exception as e:
         return False, str(e)
+
+
+
+
+
+
+
+
+
+
+
 
 @client.on(events.NewMessage(pattern='/checkvars'))
 async def check_vars(event):
@@ -178,7 +197,7 @@ async def add_source(event):
         await event.reply(f"Cannot access target `{target_id}`: {err}")
         return
     if await save_mapping(source_id, target_id):
-        await event.reply(f"Added scrape mapping: `{source_id}` → `{target_id}`\nRestart bot to apply")
+        await event.reply(f"Added scrape mapping: `{source_id}` → `{target_id}`")
     else:
         await event.reply("Failed to save")
 
@@ -218,9 +237,13 @@ async def add_gif(event):
         await event.reply("IDs must be numbers")
         return
     try:
-        supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "gif"}, on_conflict="source_id").execute()
+        supabase.table("auto_mappings").upsert(
+            {"source_id": source_id, "target_id": target_id, "mode": "gif"},
+            on_conflict="source_id,mode"
+        ).execute()
         CONFIG["auto_gif"][str(source_id)] = str(target_id)
-        await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled\nRestart bot to apply")
+        rebuild_mapped_chats()
+        await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
@@ -243,6 +266,7 @@ async def remove_gif(event):
     try:
         supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "gif").execute()
         CONFIG["auto_gif"].pop(str(source_id), None)
+        rebuild_mapped_chats()
         await event.reply(f"Removed GIF mapping for `{source_id}`")
     except Exception as e:
         await event.reply(f"Failed: {e}")
@@ -262,9 +286,13 @@ async def add_short(event):
         await event.reply("IDs must be numbers")
         return
     try:
-        supabase.table("auto_mappings").upsert({"source_id": source_id, "target_id": target_id, "mode": "short"}, on_conflict="source_id").execute()
+        supabase.table("auto_mappings").upsert(
+            {"source_id": source_id, "target_id": target_id, "mode": "short"},
+            on_conflict="source_id,mode"
+        ).execute()
         CONFIG["auto_short"][str(source_id)] = str(target_id)
-        await event.reply(f"Added 60s-120s auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled\nRestart bot to apply")
+        rebuild_mapped_chats()
+        await event.reply(f"Added 60s-120s auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
     except Exception as e:
         await event.reply(f"Failed: {e}")
 
@@ -287,19 +315,10 @@ async def remove_short(event):
     try:
         supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "short").execute()
         CONFIG["auto_short"].pop(str(source_id), None)
+        rebuild_mapped_chats()
         await event.reply(f"Removed short mapping for `{source_id}`")
     except Exception as e:
         await event.reply(f"Failed: {e}")
-
-
-
-
-
-
-
-
-
-
 
 @client.on(events.NewMessage(pattern='/listmappings'))
 async def list_mappings(event):
@@ -339,7 +358,7 @@ async def scrape_history(event):
         await event.reply("Invalid source ID")
         return
     if str(source_id) not in CONFIG["sources"]:
-        await event.reply("Source not mapped. Use `/addsource` first and restart bot")
+        await event.reply("Source not mapped. Use `/addsource` first")
         return
     target_id = int(CONFIG["sources"][str(source_id)])
     max_mb = MAX_FILE_SIZE // 1024 // 1024
@@ -398,7 +417,7 @@ async def scrape_gif_history(event):
         await event.reply("Invalid source ID")
         return
     if str(source_id) not in CONFIG["auto_gif"]:
-        await event.reply("Source not mapped for GIFs. Use `/addgif` first and restart bot")
+        await event.reply("Source not mapped for GIFs. Use `/addgif` first")
         return
     target_id = int(CONFIG["auto_gif"][str(source_id)])
 
@@ -441,7 +460,7 @@ async def scrape_short_history(event):
         await event.reply("Invalid source ID")
         return
     if str(source_id) not in CONFIG["auto_short"]:
-        await event.reply("Source not mapped for shorts. Use `/addshort` first and restart bot")
+        await event.reply("Source not mapped for shorts. Use `/addshort` first")
         return
     target_id = int(CONFIG["auto_short"][str(source_id)])
 
@@ -537,7 +556,7 @@ async def stats(event):
     max_mb = MAX_FILE_SIZE // 1024 // 1024
     await event.reply(f"**Stats**\nScraped: `{scraped_count}`\nSkipped >{max_mb}MB: `{skipped_count}`\nScrape mappings: `{len(CONFIG['sources'])}`\nGIF mappings: `{len(CONFIG['auto_gif'])}`\nShort mappings: `{len(CONFIG['auto_short'])}`")
 
-@client.on(events.NewMessage)
+@client.on(events.NewMessage(chats=mapped_chats))
 async def auto_forward(event):
     src = str(event.chat_id)
 
