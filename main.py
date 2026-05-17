@@ -356,7 +356,6 @@ async def list_mappings(event):
 
 
 
-
 @client.on(events.NewMessage(pattern='/scrape'))
 async def scrape_history(event):
     global scraped_count, skipped_count
