@@ -171,34 +171,28 @@ async def getid(event):
     chat = None
     message = event.message
 
-    # 1. If user replied to a forwarded message
+    # 1. Replied to a forwarded message (most common)
     if message.reply_to:
         try:
             replied = await event.get_reply_message()
             if replied and replied.forward:
                 fwd = replied.forward
-                chat = (
-                    getattr(fwd, 'chat', None) or 
-                    getattr(getattr(fwd, 'origin', None), 'chat', None)
-                )
-        except Exception:
+                chat = getattr(fwd, 'chat', None) or getattr(getattr(fwd, 'origin', None), 'chat', None)
+        except:
             pass
 
-    # 2. If the message itself is forwarded
+    # 2. Message itself is forwarded
     if not chat and message.forward:
         fwd = message.forward
-        chat = (
-            getattr(fwd, 'chat', None) or 
-            getattr(getattr(fwd, 'origin', None), 'chat', None)
-        )
+        chat = getattr(fwd, 'chat', None) or getattr(getattr(fwd, 'origin', None), 'chat', None)
 
-    # 3. If sent directly in group/channel
+    # 3. Used directly in group/channel
     if not chat and (event.is_group or event.is_channel):
         chat = event.chat
 
     if not chat:
         await event.reply(
-            "Forward a message from the group/channel to me, "
+            "Forward a message from the group/channel **to me**, "
             "then **reply** to that forwarded message with `/getid`"
         )
         return
@@ -259,10 +253,11 @@ async def resync_group_topics(event):
     await msg.edit(f"**Resync Complete**\nAdded {created} new topic(s).\nTotal mapped: {len(topic_map)}")
 
 
-@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))
+@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))   # ← Fixed with raw string 'r'
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
+    
     args = event.text.split()
     fresh = len(args) > 2 and args[2] == 'fresh'
     source_id = int(event.pattern_match.group(1))
@@ -378,7 +373,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 
