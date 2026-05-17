@@ -171,7 +171,6 @@ async def getid(event):
     chat = None
     message = event.message
 
-    # 1. Replied to a forwarded message
     if message.reply_to:
         try:
             replied = await event.get_reply_message()
@@ -181,12 +180,10 @@ async def getid(event):
         except:
             pass
 
-    # 2. Message itself is forwarded
     if not chat and message.forward:
         fwd = message.forward
         chat = getattr(fwd, 'chat', None) or getattr(getattr(fwd, 'origin', None), 'chat', None)
 
-    # 3. Used directly in group/channel
     if not chat and (event.is_group or event.is_channel):
         chat = event.chat
 
@@ -198,7 +195,7 @@ async def getid(event):
     await event.reply(f"**ID:** `{chat.id}`\n**Name:** `{title}`")
 
 
-@client.on(events.NewMessage(pattern=r'/resyncgroup (-?\d+) (-?\d+)'))
+@client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
         return
@@ -250,7 +247,7 @@ async def resync_group_topics(event):
     await msg.edit(f"**Resync Complete**\nAdded {created} new topic(s).\nTotal mapped: {len(topic_map)}")
 
 
-@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))
+@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)'))
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
@@ -301,6 +298,7 @@ async def start(event):
     await event.reply(msg2)
 
 
+# Keep the other handlers as they are (addsource, removesource, listmappings)
 @client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
     if not is_admin(event.sender_id):
@@ -369,7 +367,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 @client.on(events.NewMessage(pattern='/scrape'))
