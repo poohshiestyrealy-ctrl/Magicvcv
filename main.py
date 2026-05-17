@@ -171,10 +171,11 @@ async def getid(event):
     chat = None
 
     # Check if it's a forwarded message
-    if getattr(event.message, 'forward', None):
-        fwd = event.message.forward
-        if getattr(fwd, 'origin', None) and getattr(fwd.origin, 'chat', None):
-            chat = fwd.origin.chat
+    fwd = getattr(event.message, 'forward', None)
+    if fwd:
+        origin = getattr(fwd, 'origin', None)
+        if origin and getattr(origin, 'chat', None):
+            chat = origin.chat
         elif getattr(fwd, 'chat', None):
             chat = fwd.chat
 
@@ -186,7 +187,8 @@ async def getid(event):
         await event.reply("Forward a message from the group/channel to me, then reply to it with /getid")
         return
 
-    await event.reply(f"ID: `{chat.id}`\nName: `{getattr(chat, 'title', 'Unknown')}`")
+    title = getattr(chat, 'title', None) or getattr(chat, 'first_name', 'Unknown')
+    await event.reply(f"ID: `{chat.id}`\nName: `{title}`")
 
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?\d+) (-?\d+)'))
 async def resync_group_topics(event):
@@ -348,7 +350,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 
