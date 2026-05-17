@@ -179,12 +179,12 @@ async def getid(event):
         chat = event.chat
 
     if not chat:
-        await event.reply("Forward a message from the group/channel to me, or send /getid inside the group.")
+        await event.reply("Forward a message from the group/channel to me, then reply to it with /getid")
         return
 
     await event.reply(f"ID: `{chat.id}`\nName: `{getattr(chat, 'title', 'Unknown')}`")
 
-@client.on(events.NewMessage(pattern='/resyncgroup (-?\d+) (-?\d+)'))
+@client.on(events.NewMessage(pattern=r'/resyncgroup (-?\d+) (-?\d+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
         return
@@ -426,7 +426,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 
