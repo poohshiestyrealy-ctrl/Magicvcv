@@ -174,7 +174,13 @@ async def resync_group_topics(event):
     topic_map = await get_topic_map(source_id, target_id)
 
     try:
-        src_topics = await client(GetForumTopicsRequest(channel=source_id, limit=100))
+        src_topics = await client(GetForumTopicsRequest(
+            channel=source_id,
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=100
+        ))
     except Exception as e:
         await msg.edit(f"Failed to get source topics: {e}")
         return
@@ -201,7 +207,13 @@ async def resync_group_topics(event):
             continue
 
         try:
-            tgt_topics = await client(GetForumTopicsRequest(channel=target_id, limit=100))
+            tgt_topics = await client(GetForumTopicsRequest(
+                channel=target_id,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=100
+            ))
             existing = next((tt for tt in tgt_topics.topics if tt.title.lower() == t.title.lower()), None)
         except Exception:
             existing = None
@@ -239,7 +251,6 @@ async def resync_group_topics(event):
         f"Skipped: {skipped}\n"
         f"Total mapped: {len(topic_map)}"
     )
-
 
 
 
