@@ -171,10 +171,10 @@ async def getid(event):
     chat = None
 
     # Case 1: Forwarded message
-    if event.message.forward_from_chat:
-        chat = event.message.forward_from_chat
+    if getattr(event.message, 'forward', None) and getattr(event.message.forward, 'chat', None):
+        chat = event.message.forward.chat
 
-    # Case 2: Sent in a group/supergroup/channel
+    # Case 2: Sent directly in a group/supergroup/channel
     elif event.is_group or event.is_channel:
         chat = event.chat
 
@@ -228,6 +228,22 @@ async def resync_group_topics(event):
 
     await save_topic_map(source_id, target_id, topic_map)
     await msg.edit(f"**Resync Complete**\nAdded {created} new topic(s).\nTotal mapped: {len(topic_map)}")
+
+@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))
+async def scrape_group_like(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.text.split()
+    fresh = len(args) > 2 and args[2] == 'fresh'
+    source_id = int(event.pattern_match.group(1))
+
+    target_id = CONFIG["sources"].get(str(source_id))
+    if not target_id:
+        await event.reply(f"No mapping for `{source_id}`. Use `/addsource` first")
+        return
+
+    msg = await event.reply("Starting group scrape...")
+    await scrape_group_to_forum(source_id, int(target_id), msg, fresh)
 
 @client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
@@ -306,104 +322,6 @@ async def remove_source(event):
     else:
         await event.reply("Failed to remove")
 
-@client.on(events.NewMessage(pattern='/addgif'))
-async def add_gif(event):
-    if not is_admin(event.sender_id):
-        return
-    args = event.text.split()
-    if len(args)!= 3:
-        await event.reply("Usage: `/addgif -100source_id -100target_id`")
-        return
-    try:
-        source_id = int(args[1])
-        target_id = int(args[2])
-    except ValueError:
-        await event.reply("IDs must be numbers")
-        return
-    try:
-        supabase.table("auto_mappings").upsert(
-            {"source_id": source_id, "target_id": target_id, "mode": "gif"},
-            on_conflict="source_id,mode"
-        ).execute()
-        CONFIG["auto_gif"][str(source_id)] = str(target_id)
-        rebuild_mapped_chats()
-        await event.reply(f"Added GIF auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
-    except Exception as e:
-        await event.reply(f"Failed: {e}")
-
-@client.on(events.NewMessage(pattern='/removegif'))
-async def remove_gif(event):
-    if not is_admin(event.sender_id):
-        return
-    args = event.text.split()
-    if len(args)!= 2:
-        await event.reply("Usage: `/removegif -100source_id`")
-        return
-    try:
-        source_id = int(args[1])
-    except ValueError:
-        await event.reply("Invalid source ID")
-        return
-    if str(source_id) not in CONFIG["auto_gif"]:
-        await event.reply("GIF mapping not found")
-        return
-    try:
-        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "gif").execute()
-        CONFIG["auto_gif"].pop(str(source_id), None)
-        rebuild_mapped_chats()
-        await event.reply(f"Removed GIF mapping for `{source_id}`")
-    except Exception as e:
-        await event.reply(f"Failed: {e}")
-
-@client.on(events.NewMessage(pattern='/addshort'))
-async def add_short(event):
-    if not is_admin(event.sender_id):
-        return
-    args = event.text.split()
-    if len(args)!= 3:
-        await event.reply("Usage: `/addshort -100source_id -100target_id`")
-        return
-    try:
-        source_id = int(args[1])
-        target_id = int(args[2])
-    except ValueError:
-        await event.reply("IDs must be numbers")
-        return
-    try:
-        supabase.table("auto_mappings").upsert(
-            {"source_id": source_id, "target_id": target_id, "mode": "short"},
-            on_conflict="source_id,mode"
-        ).execute()
-        CONFIG["auto_short"][str(source_id)] = str(target_id)
-        rebuild_mapped_chats()
-        await event.reply(f"Added 60s-120s auto-forward: `{source_id}` → `{target_id}`\nAuto-delete enabled")
-    except Exception as e:
-        await event.reply(f"Failed: {e}")
-
-@client.on(events.NewMessage(pattern='/removeshort'))
-async def remove_short(event):
-    if not is_admin(event.sender_id):
-        return
-    args = event.text.split()
-    if len(args)!= 2:
-        await event.reply("Usage: `/removeshort -100source_id`")
-        return
-    try:
-        source_id = int(args[1])
-    except ValueError:
-        await event.reply("Invalid source ID")
-        return
-    if str(source_id) not in CONFIG["auto_short"]:
-        await event.reply("Short mapping not found")
-        return
-    try:
-        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", "short").execute()
-        CONFIG["auto_short"].pop(str(source_id), None)
-        rebuild_mapped_chats()
-        await event.reply(f"Removed short mapping for `{source_id}`")
-    except Exception as e:
-        await event.reply(f"Failed: {e}")
-
 @client.on(events.NewMessage(pattern='/listmappings'))
 async def list_mappings(event):
     if not is_admin(event.sender_id):
@@ -426,8 +344,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
-
 
 
 
