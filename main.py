@@ -171,43 +171,40 @@ async def getid(event):
     chat = None
     message = event.message
 
-    # Priority 1: User replied to a forwarded message (most common case)
+    # 1. If user replied to a forwarded message
     if message.reply_to:
         try:
             replied = await event.get_reply_message()
             if replied and replied.forward:
                 fwd = replied.forward
-                # Try different possible locations for the chat
                 chat = (
-                    getattr(fwd, 'chat', None) or
-                    getattr(getattr(fwd, 'origin', None), 'chat', None) or
-                    getattr(getattr(fwd, 'from_id', None), 'chat', None)
+                    getattr(fwd, 'chat', None) or 
+                    getattr(getattr(fwd, 'origin', None), 'chat', None)
                 )
         except Exception:
-            pass  # Fail silently and try other methods
+            pass
 
-    # Priority 2: The current message itself is forwarded
+    # 2. If the message itself is forwarded
     if not chat and message.forward:
         fwd = message.forward
         chat = (
-            getattr(fwd, 'chat', None) or
+            getattr(fwd, 'chat', None) or 
             getattr(getattr(fwd, 'origin', None), 'chat', None)
         )
 
-    # Priority 3: Command used directly in group/channel
+    # 3. If sent directly in group/channel
     if not chat and (event.is_group or event.is_channel):
         chat = event.chat
 
     if not chat:
         await event.reply(
-            "❌ Could not detect chat ID.\n\n"
-            "Please **forward** a message from the group/channel **to me**, "
+            "Forward a message from the group/channel to me, "
             "then **reply** to that forwarded message with `/getid`"
         )
         return
 
     title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or getattr(chat, 'username', 'Unknown')
-    await event.reply(f"**Chat ID:** `{chat.id}`\n**Name:** `{title}`")
+    await event.reply(f"**ID:** `{chat.id}`\n**Name:** `{title}`")
 
 
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?\d+) (-?\d+)'))
@@ -381,7 +378,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 
