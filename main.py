@@ -170,16 +170,19 @@ async def save_topic_map(source_id, target_id, mapping):
 async def getid(event):
     chat = None
 
-    if event.is_group:
-        chat = event.chat
-    elif event.message.forward_from_chat:
+    # Case 1: Forwarded message
+    if event.message.forward_from_chat:
         chat = event.message.forward_from_chat
 
+    # Case 2: Sent in a group/supergroup/channel
+    elif event.is_group or event.is_channel:
+        chat = event.chat
+
     if not chat:
-        await event.reply("Send this in the group, or forward a message from the group to me.")
+        await event.reply("Forward a message from the group/channel to me, or send /getid inside the group.")
         return
 
-    await event.reply(f"Group ID: `{chat.id}`\nName: `{getattr(chat, 'title', 'Unknown')}`")
+    await event.reply(f"ID: `{chat.id}`\nName: `{getattr(chat, 'title', 'Unknown')}`")
 
 @client.on(events.NewMessage(pattern='/resyncgroup (-?\d+) (-?\d+)'))
 async def resync_group_topics(event):
@@ -423,8 +426,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
-
 
 
 
