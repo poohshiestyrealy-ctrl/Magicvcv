@@ -169,26 +169,46 @@ async def save_topic_map(source_id, target_id, mapping):
 @client.on(events.NewMessage(pattern='/getid'))
 async def getid(event):
     chat = None
+    message = event.message
 
-    # Check if it's a forwarded message
-    fwd = getattr(event.message, 'forward', None)
-    if fwd:
-        origin = getattr(fwd, 'origin', None)
-        if origin and getattr(origin, 'chat', None):
-            chat = origin.chat
-        elif getattr(fwd, 'chat', None):
-            chat = fwd.chat
+    # Priority 1: User replied to a forwarded message (most common case)
+    if message.reply_to:
+        try:
+            replied = await event.get_reply_message()
+            if replied and replied.forward:
+                fwd = replied.forward
+                # Try different possible locations for the chat
+                chat = (
+                    getattr(fwd, 'chat', None) or
+                    getattr(getattr(fwd, 'origin', None), 'chat', None) or
+                    getattr(getattr(fwd, 'from_id', None), 'chat', None)
+                )
+        except Exception:
+            pass  # Fail silently and try other methods
 
-    # Check if sent directly in a group/channel
-    elif event.is_group or event.is_channel:
+    # Priority 2: The current message itself is forwarded
+    if not chat and message.forward:
+        fwd = message.forward
+        chat = (
+            getattr(fwd, 'chat', None) or
+            getattr(getattr(fwd, 'origin', None), 'chat', None)
+        )
+
+    # Priority 3: Command used directly in group/channel
+    if not chat and (event.is_group or event.is_channel):
         chat = event.chat
 
     if not chat:
-        await event.reply("Forward a message from the group/channel to me, then reply to it with /getid")
+        await event.reply(
+            "❌ Could not detect chat ID.\n\n"
+            "Please **forward** a message from the group/channel **to me**, "
+            "then **reply** to that forwarded message with `/getid`"
+        )
         return
 
-    title = getattr(chat, 'title', None) or getattr(chat, 'first_name', 'Unknown')
-    await event.reply(f"ID: `{chat.id}`\nName: `{title}`")
+    title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or getattr(chat, 'username', 'Unknown')
+    await event.reply(f"**Chat ID:** `{chat.id}`\n**Name:** `{title}`")
+
 
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?\d+) (-?\d+)'))
 async def resync_group_topics(event):
@@ -223,9 +243,15 @@ async def resync_group_topics(event):
                 title=t.title,
                 icon_emoji_id=getattr(t, 'icon_emoji_id', None)
             ))
-            new_id = result.updates[1].id
-            topic_map[str(t.id)] = new_id
-            created += 1
+            new_id = None
+            for update in getattr(result, 'updates', []):
+                if hasattr(update, 'id') and isinstance(getattr(update, 'id', None), int):
+                    new_id = update.id
+                    break
+
+            if new_id:
+                topic_map[str(t.id)] = new_id
+                created += 1
             await asyncio.sleep(3)
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds + 2)
@@ -234,6 +260,7 @@ async def resync_group_topics(event):
 
     await save_topic_map(source_id, target_id, topic_map)
     await msg.edit(f"**Resync Complete**\nAdded {created} new topic(s).\nTotal mapped: {len(topic_map)}")
+
 
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))
 async def scrape_group_like(event):
@@ -250,6 +277,7 @@ async def scrape_group_like(event):
 
     msg = await event.reply("Starting group scrape...")
     await scrape_group_to_forum(source_id, int(target_id), msg, fresh)
+
 
 @client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
@@ -284,12 +312,13 @@ async def start(event):
     await asyncio.sleep(0.5)
     await event.reply(msg2)
 
+
 @client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
     if not is_admin(event.sender_id):
         return
     args = event.text.split()
-    if len(args)!= 3:
+    if len(args) != 3:
         await event.reply("Usage: `/addsource -100source_id -100target_id`")
         return
     try:
@@ -307,12 +336,13 @@ async def add_source(event):
     else:
         await event.reply("Failed to save")
 
+
 @client.on(events.NewMessage(pattern='/removesource'))
 async def remove_source(event):
     if not is_admin(event.sender_id):
         return
     args = event.text.split()
-    if len(args)!= 2:
+    if len(args) != 2:
         await event.reply("Usage: `/removesource -100source_id`")
         return
     try:
@@ -328,6 +358,7 @@ async def remove_source(event):
     else:
         await event.reply("Failed to remove")
 
+
 @client.on(events.NewMessage(pattern='/listmappings'))
 async def list_mappings(event):
     if not is_admin(event.sender_id):
@@ -340,17 +371,16 @@ async def list_mappings(event):
         msg += "None\n"
 
     msg += "\n**Auto-forward mappings:**\n"
-    if CONFIG["auto_gif"]:
+    if CONFIG.get("auto_gif"):
         for src, dst in CONFIG["auto_gif"].items():
             msg += f"`{src}` → `{dst}` [GIF]\n"
-    if CONFIG["auto_short"]:
+    if CONFIG.get("auto_short"):
         for src, dst in CONFIG["auto_short"].items():
             msg += f"`{src}` → `{dst}` [60s-120s]\n"
-    if not CONFIG["auto_gif"] and not CONFIG["auto_short"]:
+    if not CONFIG.get("auto_gif") and not CONFIG.get("auto_short"):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 
