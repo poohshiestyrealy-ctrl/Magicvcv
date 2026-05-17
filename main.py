@@ -77,7 +77,6 @@ def is_gif(message):
 
 
 
-
 async def load_sources():
     global CONFIG
     try:
@@ -162,6 +161,33 @@ async def save_topic_map(source_id, target_id, mapping):
         logger.error(f"Topic map save failed: {e}")
         return False
 
+@client.on(events.NewMessage(pattern=r'/mapmain (-?[0-9]+) (-?[0-9]+)'))
+async def map_main(event):
+    if not is_admin(event.sender_id):
+        return
+
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+    msg = await event.reply("Mapping main topics...")
+
+    topic_map = await get_topic_map(source_id, target_id)
+
+    try:
+        src_topics = await client(GetForumTopicsRequest(source_id, 0, 0, 0, 100))
+        tgt_topics = await client(GetForumTopicsRequest(target_id, 0, 0, 0, 100))
+
+        src_main_id = next((t.id for t in src_topics.topics if t.id == 1), None)
+        tgt_main_id = next((t.id for t in tgt_topics.topics if t.id == 1), None)
+
+        if src_main_id is not None and tgt_main_id is not None:
+            topic_map[str(src_main_id)] = tgt_main_id
+            await save_topic_map(source_id, target_id, topic_map)
+            await msg.edit(f"✓ Mapped source topic 1 to target topic 1\n#MAIN Room messages will now go to #General")
+        else:
+            await msg.edit("Couldn't find topic 1 in one of the groups.")
+    except Exception as e:
+        await msg.edit(f"Failed: {e}")
+
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
@@ -196,7 +222,7 @@ async def resync_group_topics(event):
     skipped = 0
 
     for t in src_topics.topics:
-        if getattr(t, 'deleted', False):
+        if getattr(t, 'deleted', False) or t.id == 1: # Skip deleted and skip General/MAIN
             skipped += 1
             continue
 
@@ -214,7 +240,7 @@ async def resync_group_topics(event):
                 offset_topic=0,
                 limit=100
             ))
-            existing = next((tt for tt in tgt_topics.topics if tt.title.lower() == t.title.lower()), None)
+            existing = next((tt for tt in tgt_topics.topics if tt.title.lower().strip() == t.title.lower().strip()), None)
         except Exception:
             existing = None
 
@@ -262,11 +288,11 @@ async def resync_group_topics(event):
 
 
 
+
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)'))
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
-    args = event.text.split()
     source_id = int(event.pattern_match.group(1))
 
     target_id = CONFIG["sources"].get(str(source_id))
@@ -305,6 +331,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg):
                 video_attr = get_video_attr(message)
                 reply_to = None
 
+                # Map topic if message is in a topic
                 if getattr(message, 'reply_to_topic_id', None):
                     reply_to = topic_map.get(str(message.reply_to_topic_id))
 
@@ -346,6 +373,7 @@ async def start(event):
         f"`/scrape -100src` or `/scrape -100src fresh`\n"
         f"`/scrapegrouplike -100src`\n"
         f"`/resyncgroup -100src -100dst`\n"
+        f"`/mapmain -100src -100dst`\n"
         f"`/cleanhere -100clean -100trash`\n\n"
         f"**Note:** Restart bot after adding any mapping"
     )
