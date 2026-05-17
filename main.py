@@ -160,41 +160,6 @@ async def save_topic_map(source_id, target_id, mapping):
 
 
 
-
-
-
-
-
-
-@client.on(events.NewMessage(pattern='/getid'))
-async def getid(event):
-    chat = None
-    message = event.message
-
-    if message.reply_to:
-        try:
-            replied = await event.get_reply_message()
-            if replied and replied.forward:
-                fwd = replied.forward
-                chat = getattr(fwd, 'chat', None) or getattr(getattr(fwd, 'origin', None), 'chat', None)
-        except:
-            pass
-
-    if not chat and message.forward:
-        fwd = message.forward
-        chat = getattr(fwd, 'chat', None) or getattr(getattr(fwd, 'origin', None), 'chat', None)
-
-    if not chat and (event.is_group or event.is_channel):
-        chat = event.chat
-
-    if not chat:
-        await event.reply("Forward a message from the group/channel to me, then reply to it with /getid")
-        return
-
-    title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or getattr(chat, 'username', 'Unknown')
-    await event.reply(f"**ID:** `{chat.id}`\n**Name:** `{title}`")
-
-
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
@@ -246,7 +211,6 @@ async def resync_group_topics(event):
     await save_topic_map(source_id, target_id, topic_map)
     await msg.edit(f"**Resync Complete**\nAdded {created} new topic(s).\nTotal mapped: {len(topic_map)}")
 
-
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)'))
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
@@ -262,7 +226,6 @@ async def scrape_group_like(event):
 
     msg = await event.reply("Starting group scrape...")
     await scrape_group_to_forum(source_id, int(target_id), msg, fresh)
-
 
 @client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
@@ -290,21 +253,19 @@ async def start(event):
         f"`/addshort -100src -100dst`\n"
         f"`/removeshort -100src`\n"
         f"`/scrapeshort -100src`\n"
-        f"`/listmappings`\n`/stats`\n`/getid`\n`/checkvars`"
+        f"`/listmappings`\n`/stats`\n`/checkvars`"
     )
 
     await event.reply(msg1)
     await asyncio.sleep(0.5)
     await event.reply(msg2)
 
-
-# Keep the other handlers as they are (addsource, removesource, listmappings)
 @client.on(events.NewMessage(pattern='/addsource'))
 async def add_source(event):
     if not is_admin(event.sender_id):
         return
     args = event.text.split()
-    if len(args) != 3:
+    if len(args)!= 3:
         await event.reply("Usage: `/addsource -100source_id -100target_id`")
         return
     try:
@@ -322,13 +283,12 @@ async def add_source(event):
     else:
         await event.reply("Failed to save")
 
-
 @client.on(events.NewMessage(pattern='/removesource'))
 async def remove_source(event):
     if not is_admin(event.sender_id):
         return
     args = event.text.split()
-    if len(args) != 2:
+    if len(args)!= 2:
         await event.reply("Usage: `/removesource -100source_id`")
         return
     try:
@@ -343,7 +303,6 @@ async def remove_source(event):
         await event.reply(f"Removed `{source_id}`")
     else:
         await event.reply("Failed to remove")
-
 
 @client.on(events.NewMessage(pattern='/listmappings'))
 async def list_mappings(event):
@@ -367,6 +326,17 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
+
+
+
+
+
+
+
+
+
+
+
 
 
 @client.on(events.NewMessage(pattern='/scrape'))
