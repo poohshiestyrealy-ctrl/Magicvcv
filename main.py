@@ -171,7 +171,7 @@ async def getid(event):
     chat = None
     message = event.message
 
-    # 1. Replied to a forwarded message (most common)
+    # 1. Replied to a forwarded message
     if message.reply_to:
         try:
             replied = await event.get_reply_message()
@@ -191,10 +191,7 @@ async def getid(event):
         chat = event.chat
 
     if not chat:
-        await event.reply(
-            "Forward a message from the group/channel **to me**, "
-            "then **reply** to that forwarded message with `/getid`"
-        )
+        await event.reply("Forward a message from the group/channel to me, then reply to it with /getid")
         return
 
     title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or getattr(chat, 'username', 'Unknown')
@@ -254,11 +251,9 @@ async def resync_group_topics(event):
 
 
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?\d+)'))
-async def scrape_group_like_fixed(event):   # ← Fixed with raw string 'r'
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
-    
     args = event.text.split()
     fresh = len(args) > 2 and args[2] == 'fresh'
     source_id = int(event.pattern_match.group(1))
@@ -374,7 +369,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 
