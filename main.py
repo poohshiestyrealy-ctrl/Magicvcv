@@ -170,11 +170,15 @@ async def save_topic_map(source_id, target_id, mapping):
 async def getid(event):
     chat = None
 
-    # Case 1: Forwarded message
-    if getattr(event.message, 'forward', None) and getattr(event.message.forward, 'chat', None):
-        chat = event.message.forward.chat
+    # Check if it's a forwarded message
+    if getattr(event.message, 'forward', None):
+        fwd = event.message.forward
+        if getattr(fwd, 'origin', None) and getattr(fwd.origin, 'chat', None):
+            chat = fwd.origin.chat
+        elif getattr(fwd, 'chat', None):
+            chat = fwd.chat
 
-    # Case 2: Sent directly in a group/supergroup/channel
+    # Check if sent directly in a group/channel
     elif event.is_group or event.is_channel:
         chat = event.chat
 
@@ -344,7 +348,6 @@ async def list_mappings(event):
         msg += "None\n"
 
     await event.reply(msg)
-
 
 
 
