@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import random
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
@@ -66,7 +67,6 @@ def is_video_message(message):
 def is_gif(message):
     return (message.document and message.document.mime_type == 'video/mp4' and
             any(getattr(a, 'round_message', False) for a in message.document.attributes))
-
 
 
 
@@ -200,13 +200,7 @@ async def resync_group_topics(event):
     topic_map = await get_topic_map(source_id, target_id)
 
     try:
-        src_topics = await client(GetForumTopicsRequest(
-            channel=source_id,
-            offset_date=0,
-            offset_id=0,
-            offset_topic=0,
-            limit=100
-        ))
+        src_topics = await client(GetForumTopicsRequest(channel=source_id, offset_date=0, offset_id=0, offset_topic=0, limit=100))
     except Exception as e:
         await msg.edit(f"Failed to get source topics: {e}")
         return
@@ -222,7 +216,7 @@ async def resync_group_topics(event):
     skipped = 0
 
     for t in src_topics.topics:
-        if getattr(t, 'deleted', False) or t.id == 1: # Skip deleted and skip General/MAIN
+        if getattr(t, 'deleted', False) or t.id == 1:
             skipped += 1
             continue
 
@@ -233,13 +227,7 @@ async def resync_group_topics(event):
             continue
 
         try:
-            tgt_topics = await client(GetForumTopicsRequest(
-                channel=target_id,
-                offset_date=0,
-                offset_id=0,
-                offset_topic=0,
-                limit=100
-            ))
+            tgt_topics = await client(GetForumTopicsRequest(channel=target_id, offset_date=0, offset_id=0, offset_topic=0, limit=100))
             existing = next((tt for tt in tgt_topics.topics if tt.title.lower().strip() == t.title.lower().strip()), None)
         except Exception:
             existing = None
@@ -249,11 +237,7 @@ async def resync_group_topics(event):
             updated += 1
         else:
             try:
-                result = await client(CreateForumTopicRequest(
-                    channel=target_id,
-                    title=t.title,
-                    icon_emoji_id=getattr(t, 'icon_emoji_id', None)
-                ))
+                result = await client(CreateForumTopicRequest(channel=target_id, title=t.title, icon_emoji_id=getattr(t, 'icon_emoji_id', None)))
                 new_id = None
                 for update in getattr(result, 'updates', []):
                     if hasattr(update, 'id') and isinstance(getattr(update, 'id', None), int):
@@ -270,30 +254,14 @@ async def resync_group_topics(event):
                 logger.error(f"Topic create failed for {t.title}: {e}")
 
     await save_topic_map(source_id, target_id, topic_map)
-    await msg.edit(
-        f"**Resync Complete**\n"
-        f"Created: {created}\n"
-        f"Mapped existing: {updated}\n"
-        f"Skipped: {skipped}\n"
-        f"Total mapped: {len(topic_map)}"
-    )
+    await msg.edit(f"**Resync Complete**\nCreated: {created}\nMapped existing: {updated}\nSkipped: {skipped}\nTotal mapped: {len(topic_map)}")
 
-
-
-
-
-
-
-
-
-
-
-
-@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)'))
+@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+fresh)?'))
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
     source_id = int(event.pattern_match.group(1))
+    force_fresh = event.pattern_match.group(2) is not None
 
     target_id = CONFIG["sources"].get(str(source_id))
     if not target_id:
@@ -301,9 +269,9 @@ async def scrape_group_like(event):
         return
 
     msg = await event.reply("Starting group scrape...")
-    await scrape_group_with_topics(source_id, int(target_id), msg)
+    await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
 
-async def scrape_group_with_topics(source_id, target_id, status_msg):
+async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
 
@@ -311,17 +279,22 @@ async def scrape_group_with_topics(source_id, target_id, status_msg):
         await status_msg.edit("No topic map found. Run `/resyncgroup source_id target_id` first")
         return
 
+    offset_id = 0 if force_fresh else await get_checkpoint(f"group_{source_id}")
+    if force_fresh:
+        await save_checkpoint(f"group_{source_id}", 0)
+
     count = checked = errors = 0
     current_delay = UPLOAD_DELAY
 
     try:
-        async for message in client.iter_messages(source_id, limit=None, reverse=True):
+        async for message in client.iter_messages(source_id, limit=None, offset_id=offset_id, reverse=True):
             checked += 1
             if checked % 500 == 0:
                 try:
                     await status_msg.edit(f"Checked {checked}... Uploaded {count}... Errors {errors}")
                 except:
                     pass
+                await save_checkpoint(f"group_{source_id}", message.id)
 
             if is_video_message(message):
                 if message.file.size > MAX_FILE_SIZE:
@@ -331,7 +304,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg):
                 video_attr = get_video_attr(message)
                 reply_to = None
 
-                # Map topic if message is in a topic
                 if getattr(message, 'reply_to_topic_id', None):
                     reply_to = topic_map.get(str(message.reply_to_topic_id))
 
@@ -346,6 +318,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg):
                     )
                     count += 1
                     scraped_count += 1
+                    await save_checkpoint(f"group_{source_id}", message.id)
                     await asyncio.sleep(current_delay)
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds)
@@ -353,11 +326,52 @@ async def scrape_group_with_topics(source_id, target_id, status_msg):
                 except Exception as e:
                     errors += 1
 
+        await save_checkpoint(f"group_{source_id}", 0)
         final = f"**Topic scrape done**\nChecked: `{checked}`\nUploaded: `{count}`\nSkipped >{MAX_FILE_SIZE//1024//1024}MB: `{skipped_count}`\nErrors: `{errors}`"
         await status_msg.edit(final)
 
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
+@client.on(events.NewMessage(pattern=r'/testmapping'))
+async def test_mapping(event):
+    if len(topic_map) < 3:
+        await event.reply("Need at least 3 topics in topic_map")
+        return
+
+    test_topics = random.sample(list(topic_map.items()), 3)
+    await event.reply(f"Testing 3 random topics: {[k for k,v in test_topics]}")
+
+    for src_id_str, tgt_id in test_topics:
+        src_id = int(src_id_str)
+        msg = await client.get_messages(source_entity, limit=1, reply_to=src_id)
+
+        if not msg:
+            await event.reply(f"Topic {src_id} → {tgt_id}: ⚠️ Empty")
+            await asyncio.sleep(1)
+            continue
+
+        await client.send_file(
+            target_entity,
+            msg[0].media,
+            caption=f"TEST: Source {src_id} → Target {tgt_id}",
+            reply_to=tgt_id
+        )
+
+        await event.reply(f"Topic {src_id} → Topic {tgt_id}: ✅ Sent")
+        await asyncio.sleep(1)
+
+    await event.reply("Check those 3 topics in target group. If messages landed right, mapping works.")
 
 @client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
@@ -371,11 +385,10 @@ async def start(event):
         f"`/addsource -100src -100dst`\n"
         f"`/removesource -100src`\n"
         f"`/scrape -100src` or `/scrape -100src fresh`\n"
-        f"`/scrapegrouplike -100src`\n"
+        f"`/scrapegrouplike -100src` or `/scrapegrouplike -100src fresh`\n"
         f"`/resyncgroup -100src -100dst`\n"
         f"`/mapmain -100src -100dst`\n"
-        f"`/cleanhere -100clean -100trash`\n\n"
-        f"**Note:** Restart bot after adding any mapping"
+        f"`/cleanhere -100clean -100trash`\n"
     )
 
     msg2 = (
