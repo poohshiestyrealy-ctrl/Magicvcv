@@ -343,33 +343,49 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
-@client.on(events.NewMessage(pattern=r'/testmapping'))
+@client.on(events.NewMessage(pattern=r'/testmapping (-?[0-9]+) (-?[0-9]+)'))
 async def test_mapping(event):
+    if not is_admin(event.sender_id):
+        return
+
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+
+    msg = await event.reply("Loading topic map...")
+
+    topic_map = await get_topic_map(source_id, target_id)
     if len(topic_map) < 3:
-        await event.reply("Need at least 3 topics in topic_map")
+        await msg.edit("Need at least 3 mapped topics. Run `/resyncgroup` first")
+        return
+
+    try:
+        source_entity = await client.get_entity(source_id)
+        target_entity = await client.get_entity(target_id)
+    except Exception as e:
+        await msg.edit(f"Failed to get entities: {e}")
         return
 
     test_topics = random.sample(list(topic_map.items()), 3)
-    await event.reply(f"Testing 3 random topics: {[k for k,v in test_topics]}")
+    await msg.edit(f"Testing 3 random topics: {[k for k,v in test_topics]}")
 
     for src_id_str, tgt_id in test_topics:
         src_id = int(src_id_str)
-        msg = await client.get_messages(source_entity, limit=1, reply_to=src_id)
+        msgs = await client.get_messages(source_entity, limit=1, reply_to=src_id)
 
-        if not msg:
-            await event.reply(f"Topic {src_id} → {tgt_id}: ⚠️ Empty")
+        if not msgs or not msgs[0].media:
+            await event.reply(f"Topic {src_id} → {tgt_id}: ⚠️ No media found")
             await asyncio.sleep(1)
             continue
 
         await client.send_file(
             target_entity,
-            msg[0].media,
+            msgs[0].media,
             caption=f"TEST: Source {src_id} → Target {tgt_id}",
             reply_to=tgt_id
         )
 
         await event.reply(f"Topic {src_id} → Topic {tgt_id}: ✅ Sent")
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
     await event.reply("Check those 3 topics in target group. If messages landed right, mapping works.")
 
@@ -388,6 +404,7 @@ async def start(event):
         f"`/scrapegrouplike -100src` or `/scrapegrouplike -100src fresh`\n"
         f"`/resyncgroup -100src -100dst`\n"
         f"`/mapmain -100src -100dst`\n"
+        f"`/testmapping -100src -100dst`\n"
         f"`/cleanhere -100clean -100trash`\n"
     )
 
