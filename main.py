@@ -68,15 +68,6 @@ def is_gif(message):
     return (message.document and message.document.mime_type == 'video/mp4' and
             any(getattr(a, 'round_message', False) for a in message.document.attributes))
 
-
-
-
-
-
-
-
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -161,6 +152,37 @@ async def save_topic_map(source_id, target_id, mapping):
         logger.error(f"Topic map save failed: {e}")
         return False
 
+async def save_archive_topic_id(source_id, target_id, archive_topic_id):
+    try:
+        supabase.table("group_topic_map").upsert({
+            "source_id": source_id,
+            "target_id": target_id,
+            "archive_topic_id": archive_topic_id
+        }, on_conflict="source_id,target_id").execute()
+        return True
+    except Exception as e:
+        logger.error(f"Archive topic save failed: {e}")
+        return False
+
+async def get_archive_topic_id(source_id, target_id):
+    try:
+        res = supabase.table("group_topic_map").select("archive_topic_id").eq("source_id", source_id).eq("target_id", target_id).single().execute()
+        return res.data["archive_topic_id"] if res.data and res.data.get("archive_topic_id") else None
+    except:
+        return None
+
+
+
+
+
+
+
+
+
+
+
+
+
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
@@ -173,7 +195,7 @@ async def resync_group_topics(event):
     topic_map = await get_topic_map(source_id, target_id)
 
     try:
-        src_topics = await client(GetForumTopicsRequest(channel=source_id, offset_date=0, offset_id=0, offset_topic=0, limit=100))
+        src_topics = await client(GetForumTopicsRequest(channel=source_id, offset_date=0, offset_id=0, offset_topic=0, limit=200))
     except Exception as e:
         await msg.edit(f"Failed to get source topics: {e}")
         return
@@ -187,6 +209,7 @@ async def resync_group_topics(event):
     created = 0
     updated = 0
     skipped = 0
+    limit_hit = False
 
     for t in src_topics.topics:
         if getattr(t, 'deleted', False) or t.id == 1:
@@ -199,6 +222,10 @@ async def resync_group_topics(event):
             skipped += 1
             continue
 
+        if len(topic_map) >= 100:
+            limit_hit = True
+            break
+
         try:
             tgt_topics = await client(GetForumTopicsRequest(channel=target_id, offset_date=0, offset_id=0, offset_topic=0, limit=100))
             existing = next((tt for tt in tgt_topics.topics if tt.title.lower().strip() == t.title.lower().strip()), None)
@@ -210,7 +237,7 @@ async def resync_group_topics(event):
             updated += 1
         else:
             try:
-                result = await client(CreateForumTopicRequest(channel=target_id, title=t.title, icon_emoji_id=getattr(t, 'icon_emoji_id', None)))
+                result = await client(CreateForumTopicRequest(channel=target_id, title=t.title[:128], icon_emoji_id=getattr(t, 'icon_emoji_id', None)))
                 new_id = None
                 for update in getattr(result, 'updates', []):
                     if hasattr(update, 'id') and isinstance(getattr(update, 'id', None), int):
@@ -226,8 +253,34 @@ async def resync_group_topics(event):
             except Exception as e:
                 logger.error(f"Topic create failed for {t.title}: {e}")
 
+    archive_topic_id = None
+    if limit_hit:
+        try:
+            tgt_topics = await client(GetForumTopicsRequest(channel=target_id, offset_date=0, offset_id=0, offset_topic=0, limit=100))
+            archive_topic = next((tt for tt in tgt_topics.topics if tt.title.lower() == "archive"), None)
+            if not archive_topic:
+                result = await client(CreateForumTopicRequest(channel=target_id, title="Archive"))
+                for update in getattr(result, 'updates', []):
+                    if hasattr(update, 'id'):
+                        archive_topic_id = update.id
+                        break
+            else:
+                archive_topic_id = archive_topic.id
+
+            for t in src_topics.topics:
+                src_id = str(t.id)
+                if src_id not in topic_map and not getattr(t, 'deleted', False) and t.id!= 1:
+                    topic_map[src_id] = archive_topic_id
+
+            await save_archive_topic_id(source_id, target_id, archive_topic_id)
+        except Exception as e:
+            logger.error(f"Failed to create Archive topic: {e}")
+
     await save_topic_map(source_id, target_id, topic_map)
-    await msg.edit(f"**Resync Complete**\nCreated: {created}\nMapped existing: {updated}\nSkipped: {skipped}\nTotal mapped: {len(topic_map)}")
+    msg_text = f"**Resync Complete**\nCreated: {created}\nMapped existing: {updated}\nSkipped: {skipped}\nTotal mapped: {len(topic_map)}"
+    if archive_topic_id:
+        msg_text += f"\nArchive topic ID: {archive_topic_id}\nOverflow topics dumped to Archive"
+    await msg.edit(msg_text)
 
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+fresh)?'))
 async def scrape_group_like(event):
@@ -247,6 +300,7 @@ async def scrape_group_like(event):
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
+    archive_topic_id = await get_archive_topic_id(source_id, target_id)
 
     if not topic_map:
         await status_msg.edit("No topic map found. Run `/resyncgroup source_id target_id` first")
@@ -276,15 +330,17 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
             if is_video_message(message):
                 video_attr = get_video_attr(message)
 
-                # Determine target topic
                 reply_to = None
-                if getattr(message, 'reply_to_topic_id', None):
-                    reply_to = topic_map.get(str(message.reply_to_topic_id))
-                else:
-                    reply_to = 1 # No topic = send to General
+                src_topic_id = getattr(message, 'reply_to_topic_id', None)
 
-                # Skip if it was actually in Main topic 1
-                if reply_to == 1 and getattr(message, 'reply_to_topic_id', None) == 1:
+                if src_topic_id:
+                    reply_to = topic_map.get(str(src_topic_id))
+                    if reply_to is None and archive_topic_id:
+                        reply_to = archive_topic_id
+                else:
+                    reply_to = 1
+
+                if src_topic_id == 1:
                     continue
 
                 try:
@@ -305,21 +361,16 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                     current_delay = min(current_delay * 1.5, 60)
                 except Exception as e:
                     errors += 1
+                    logger.error(f"Send failed: {e}")
 
         await save_checkpoint(f"group_{source_id}", 0)
         final = f"**Topic scrape done**\nChecked: `{checked}`\nUploaded: `{count}`\nSkipped >{MAX_FILE_SIZE//1024//1024}MB: `{skipped_count}`\nErrors: `{errors}`"
+        if archive_topic_id:
+            final += f"\nOverflow sent to Archive topic"
         await status_msg.edit(final)
 
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
-
-
-
-
-
-
-
-
 
 @client.on(events.NewMessage(pattern=r'/testmapping (-?[0-9]+) (-?[0-9]+)'))
 async def test_mapping(event):
@@ -343,8 +394,8 @@ async def test_mapping(event):
         await msg.edit(f"Failed to get entities: {e}")
         return
 
-    test_topics = random.sample(list(topic_map.items()), 3)
-    await msg.edit(f"Testing 3 random topics: {[k for k,v in test_topics]}")
+    test_topics = random.sample(list(topic_map.items()), min(3, len(topic_map)))
+    await msg.edit(f"Testing {len(test_topics)} random topics: {[k for k,v in test_topics]}")
 
     for src_id_str, tgt_id in test_topics:
         src_id = int(src_id_str)
@@ -365,7 +416,19 @@ async def test_mapping(event):
         await event.reply(f"Topic {src_id} → Topic {tgt_id}: ✅ Sent")
         await asyncio.sleep(2)
 
-    await event.reply("Check those 3 topics in target group. If messages landed right, mapping works.")
+    await event.reply("Check those topics in target group. If messages landed right, mapping works.")
+
+
+
+
+
+
+
+
+
+
+
+
 
 @client.on(events.NewMessage(pattern='/(start|help)'))
 async def start(event):
@@ -381,7 +444,6 @@ async def start(event):
         f"`/scrape -100src` or `/scrape -100src fresh`\n"
         f"`/scrapegrouplike -100src` or `/scrapegrouplike -100src fresh`\n"
         f"`/resyncgroup -100src -100dst`\n"
-        f"`/mapmain -100src -100dst`\n"
         f"`/testmapping -100src -100dst`\n"
         f"`/cleanhere -100clean -100trash`\n"
     )
