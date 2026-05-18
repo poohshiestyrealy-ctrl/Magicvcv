@@ -2,12 +2,14 @@ import os
 import asyncio
 import logging
 import random
+import re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 from telethon.tl.types import DocumentAttributeVideo
 from telethon.tl.functions.channels import CreateForumTopicRequest
 from telethon.tl.functions.channels import GetForumTopicsRequest
+from telethon.errors.rpcerrorlist import FloodWaitError, ChatAdminRequiredError
 from supabase import create_client, Client
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -180,13 +182,6 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
-
-
-import asyncio
-import random
-from telethon.tl.functions.channels import GetForumTopicsRequest, CreateForumTopicRequest
-from telethon.errors.rpcerrorlist import FloodWaitError, ChatAdminRequiredError
-
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
@@ -297,7 +292,6 @@ async def resync_group_topics(event):
             updated += 1
         else:
             if len(topic_map) >= 100:
-                # Overflow goes to Archive
                 topic_map[src_id] = archive_topic_id
                 skipped += 1
             else:
@@ -466,7 +460,9 @@ async def test_mapping(event):
 
 
 
-@client.on(events.NewMessage(pattern='/(start|help)'))
+
+
+@client.on(events.NewMessage(pattern=re.compile(r'^/(start|help)(@\w+)?$', re.IGNORECASE)))
 async def start(event):
     if not is_admin(event.sender_id):
         return
