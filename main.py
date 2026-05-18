@@ -75,15 +75,6 @@ def is_gif(message):
 
 
 
-
-
-
-
-
-
-
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -271,9 +262,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
-
-
-
 @client.on(events.NewMessage(pattern=r'/start'))
 async def start_cmd(event):
     if not is_admin(event.sender_id):
@@ -286,31 +274,34 @@ async def help_handler(event):
         return
 
     help_text = """
-**Yaga Bot Commands**
+**Yaga Bot Commands - Beginner Guide**
 
-**Setup:**
-`/addsource <src_id> <dst_id>` - Add scrape mapping
-`/removesource <src_id>` - Remove mapping
-`/listmappings` - Show all mappings
-`/resyncgroupfresh <src_id> <dst_id>` - Fresh sync, creates 1 topic per source topic
-`/clearmapping <src_id> <dst_id>` - Delete mapping from Supabase
-`/scrapegrouplike <src_id> [fresh]` - Scrape group with topics
-`/debugtopics <group_id> [group_id2]` - Show topics bot sees
+**1. Setup Topics:**
+`/addsource <src_id> <dst_id>` - Link source group to target group
+`/removesource <src_id>` - Remove the link
+`/listmappings` - Show all linked groups
+`/resyncgroupfresh <src_id> <dst_id>` - Create 1 topic in target for every topic in source
+`/clearmapping <src_id> <dst_id>` - Delete the topic mapping
+`/debugtopics <group_id> [group_id2]` - Check if bot can see topics
 
-**GIF/Short Scraping:**
-`/addauto gif|short <src> <dst>` - Add auto mapping
-`/removeauto gif|short <src>` - Remove auto mapping
-`/scrapegif <src_id>` - Scrape GIFs from source
-`/scrapeshort <src_id>` - Scrape shorts <60s from source
+**2. Scrape Groups:**
+`/scrapegrouplike <src_id> [fresh]` - Start scraping. Add 'fresh' to start from beginning
 
-**Archive Remap:**
-`/maparchive <source_id>` - Check if Archive topic exists
-`/remaparchive <src_id> <dst_id>` - Move messages from Archive to target
-`/remaparchive <src_id> <dst_id> --reset` - Start over, ignore checkpoint
+**3. Auto GIF/Short:**
+`/addauto gif|short <src> <dst>` - Auto forward GIFs or shorts
+`/removeauto gif|short <src>` - Stop auto forward
+`/scrapegif <src_id>` - Scrape existing GIFs
+`/scrapeshort <src_id>` - Scrape existing shorts under 60s
+
+**4. Archive Remap:**
+`/maparchive <source_id>` - Check if 'Archive' topic exists in source
+`/remaparchive <src_id> <dst_id>` - Move messages from Archive to correct topics
+`/remaparchive <src_id> <dst_id> --reset` - Restart remap from beginning
 `/unmaparchive <src_id> <dst_id>` - Delete topic mapping
-`/clearremapjob <src_id> <dst_id>` - Delete resume checkpoint
-`/settopicmap <src_id> <dst_id> <src_tid> <dst_tid>` - Manually map one topic
+`/clearremapjob <src_id> <dst_id>` - Reset remap progress
+`/settopicmap <src_id> <dst_id> <src_tid> <dst_tid>` - Manually link one topic
 
+**5. Other:**
 `/stats` - Show stats
 `/start` - Check if bot is online
 `/help` - Show this message
@@ -366,8 +357,11 @@ async def resync_group_fresh(event):
     msg = await event.reply("🔄 Starting FRESH topic resync...")
 
     try:
-        src_entity = await asyncio.wait_for(client.get_entity(source_id), timeout=10)
-        tgt_entity = await asyncio.wait_for(client.get_entity(target_id), timeout=10)
+        src_entity = await asyncio.wait_for(client.get_entity(source_id), timeout=15)
+        tgt_entity = await asyncio.wait_for(client.get_entity(target_id), timeout=15)
+    except asyncio.TimeoutError:
+        await msg.edit("❌ Timeout. Open both groups once on Telegram Desktop with the userbot account.")
+        return
     except Exception as e:
         await msg.edit(f"❌ Error: {e}")
         return
@@ -376,12 +370,14 @@ async def resync_group_fresh(event):
         await msg.edit("❌ Both groups need topics enabled.")
         return
 
+    # Fetch source topics with retry
     all_topics = []
     offset_topic = 0
     offset_id = 0
+    retries = 0
 
     await msg.edit("📡 Fetching source topics...")
-    for _ in range(10):
+    while retries < 3:
         try:
             res = await asyncio.wait_for(
                 client(GetForumTopicsRequest(
@@ -391,7 +387,7 @@ async def resync_group_fresh(event):
                     offset_topic=offset_topic,
                     limit=20,
                 )),
-                timeout=15
+                timeout=20
             )
             if not res.topics:
                 break
@@ -401,7 +397,11 @@ async def resync_group_fresh(event):
             last_topic = res.topics[-1]
             offset_topic = last_topic.id
             offset_id = last_topic.top_message
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
+        except asyncio.TimeoutError:
+            retries += 1
+            await asyncio.sleep(3)
+            continue
         except Exception as e:
             await msg.edit(f"❌ Failed fetching source: {e}")
             return
@@ -411,24 +411,37 @@ async def resync_group_fresh(event):
         await msg.edit("❌ No topics found in source.")
         return
 
-    new_mapping = {}
-    created = 0
-    skipped = 0
+    await msg.edit(f"✅ Found **{len(src_topics)}** source topics. Checking target...")
 
-    tgt_res = await client(GetForumTopicsRequest(channel=tgt_entity, limit=100))
-    active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
+    try:
+        tgt_res = await asyncio.wait_for(
+            client(GetForumTopicsRequest(channel=tgt_entity, limit=100)),
+            timeout=20
+        )
+        active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
+    except Exception as e:
+        await msg.edit(f"❌ Failed to fetch target topics: {e}")
+        return
 
     archive_topic = next((tt for tt in active_topics if tt.title == "Archive"), None)
     if not archive_topic:
-        result = await client(CreateForumTopicRequest(channel=tgt_entity, title="Archive"))
-        archive_topic_id = result.updates[1].topic.id
-        await asyncio.sleep(2)
+        try:
+            result = await client(CreateForumTopicRequest(channel=tgt_entity, title="Archive"))
+            archive_topic_id = result.updates[1].topic.id
+            await asyncio.sleep(2)
+        except Exception as e:
+            await msg.edit(f"Failed to create Archive topic: {e}")
+            return
     else:
         archive_topic_id = archive_topic.id
 
     await save_archive_topic_id(source_id, target_id, archive_topic_id)
 
+    new_mapping = {}
+    created = 0
+    skipped = 0
     available_slots = 100 - len(active_topics)
+
     await msg.edit(f"Target has {len(active_topics)} active topics. Available slots: {available_slots}. Starting...")
 
     for t in src_topics:
@@ -456,6 +469,48 @@ async def resync_group_fresh(event):
     await save_topic_map(source_id, target_id, new_mapping)
     await msg.edit(f"**Fresh Resync Complete**\nCreated: `{created}`\nSkipped to Archive: `{skipped}`")
 
+@client.on(events.NewMessage(pattern=r'/debugtopics (-?[0-9]+)(?:\s+(-?[0-9]+))?'))
+async def debug_topics(event):
+    if not is_admin(event.sender_id):
+        return
+    args = event.pattern_match.groups()
+    gid1 = int(args[0])
+    gid2 = int(args[1]) if args[1] else None
+    msg = await event.reply("Fetching topics...")
+
+    try:
+        entity1 = await asyncio.wait_for(client.get_entity(gid1), timeout=15)
+        res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity1, limit=200)), timeout=20)
+        text = f"**Group {gid1}**\nTotal: {len(res.topics)}\n"
+        for t in res.topics[:50]:
+            text += f"ID:`{t.id}` Title:`{t.title}`\n"
+
+        if gid2:
+            entity2 = await asyncio.wait_for(client.get_entity(gid2), timeout=15)
+            res2 = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity2, limit=200)), timeout=20)
+            text += f"\n**Group {gid2}**\nTotal: {len(res2.topics)}\n"
+            for t in res2.topics[:50]:
+                text += f"ID:`{t.id}` Title:`{t.title}`\n"
+
+        await msg.edit(text[:4000])
+    except asyncio.TimeoutError:
+        await msg.edit("❌ Timeout. Open the group once in Telegram Desktop with the userbot account.")
+    except Exception as e:
+        await msg.edit(f"Error: {e}")
+
+@client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
+async def clear_mapping(event):
+    if not is_admin(event.sender_id):
+        return
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+    msg = await event.reply(f"Clearing mapping for `{source_id}` -> `{target_id}`...")
+    try:
+        supabase.table("group_topic_map").delete().eq("source_id", source_id).eq("target_id", target_id).execute()
+        await msg.edit("**Mapping cleared**\nUse `/resyncgroupfresh {source_id} {target_id}` to rebuild.")
+    except Exception as e:
+        await msg.edit(f"Failed: {e}")
+
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+fresh)?'))
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
@@ -470,14 +525,6 @@ async def scrape_group_like(event):
 
     msg = await event.reply("Starting group scrape...")
     await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
-
-
-
-
-
-
-
-
 
 
 
@@ -583,59 +630,25 @@ async def stats(event):
     text = f"**Stats**\nScraped: {scraped_count}\nSkipped: {skipped_count}\nMappings: {len(CONFIG['sources'])}\nGIF Auto: {len(CONFIG['auto_gif'])}\nShort Auto: {len(CONFIG['auto_short'])}"
     await event.reply(text)
 
-@client.on(events.NewMessage(pattern=r'/debugtopics (-?[0-9]+)(?:\s+(-?[0-9]+))?'))
-async def debug_topics(event):
-    if not is_admin(event.sender_id):
-        return
-    args = event.pattern_match.groups()
-    gid1 = int(args[0])
-    gid2 = int(args[1]) if args[1] else None
-
-    msg = await event.reply("Fetching topics...")
-    try:
-        res = await client(GetForumTopicsRequest(channel=gid1, limit=200))
-        text = f"**Group {gid1}**\nTotal: {len(res.topics)}\n"
-        for t in res.topics:
-            text += f"ID:`{t.id}` Title:`{t.title}`\n"
-        if gid2:
-            res2 = await client(GetForumTopicsRequest(channel=gid2, limit=200))
-            text += f"\n**Group {gid2}**\nTotal: {len(res2.topics)}\n"
-            for t in res2.topics:
-                text += f"ID:`{t.id}` Title:`{t.title}`\n"
-        await msg.edit(text[:4000])
-    except Exception as e:
-        await msg.edit(f"Error: {e}")
-
-@client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
-async def clear_mapping(event):
-    if not is_admin(event.sender_id):
-        return
-    source_id = int(event.pattern_match.group(1))
-    target_id = int(event.pattern_match.group(2))
-    msg = await event.reply(f"Clearing mapping for `{source_id}` -> `{target_id}`...")
-    try:
-        supabase.table("group_topic_map").delete().eq("source_id", source_id).eq("target_id", target_id).execute()
-        await msg.edit("**Mapping cleared**")
-    except Exception as e:
-        await msg.edit(f"Failed: {e}")
-
 # ==================== ARCHIVE REMAP FEATURES ====================
 
 @client.on(events.NewMessage(pattern=r'/maparchive (-?[0-9]+)'))
 async def map_archive_topic(event):
+    """Step 1: Check if 'Archive' topic exists in source group"""
     if not is_admin(event.sender_id):
         return
     source_id = int(event.pattern_match.group(1))
     msg = await event.reply("Checking Archive topic...")
     try:
-        topics = await client(GetForumTopicsRequest(channel=source_id, limit=200))
+        entity = await asyncio.wait_for(client.get_entity(source_id), timeout=15)
+        topics = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity, limit=200)), timeout=20)
         archive_topic_id = None
         for t in topics.topics:
             if getattr(t, 'title', '').lower() == 'archive':
                 archive_topic_id = t.id
                 break
         if not archive_topic_id:
-            await msg.edit("❌ No Archive topic found.")
+            await msg.edit("❌ No Archive topic found in this group.")
             return
         await msg.edit(f"✅ Found Archive topic ID: `{archive_topic_id}`\n\nNext: `/remaparchive {source_id} <target_id>`")
     except Exception as e:
@@ -643,6 +656,7 @@ async def map_archive_topic(event):
 
 @client.on(events.NewMessage(pattern=r'/remaparchive (-?[0-9]+) (-?[0-9]+)( --reset)?'))
 async def remap_archive(event):
+    """Step 2: Move messages from Archive topic to correct topics in target"""
     if not is_admin(event.sender_id):
         return
     source_group_id = int(event.pattern_match.group(1))
@@ -699,6 +713,7 @@ async def remap_archive(event):
 
 @client.on(events.NewMessage(pattern=r'/unmaparchive (-?[0-9]+) (-?[0-9]+)'))
 async def unmap_archive(event):
+    """Delete topic mapping between source and target"""
     if not is_admin(event.sender_id):
         return
     source_group_id = int(event.pattern_match.group(1))
@@ -708,6 +723,7 @@ async def unmap_archive(event):
 
 @client.on(events.NewMessage(pattern=r'/clearremapjob (-?[0-9]+) (-?[0-9]+)'))
 async def clear_remap_job(event):
+    """Reset remap progress so it starts from beginning"""
     if not is_admin(event.sender_id):
         return
     job_key = f"{event.pattern_match.group(1)}:{event.pattern_match.group(2)}"
@@ -716,6 +732,7 @@ async def clear_remap_job(event):
 
 @client.on(events.NewMessage(pattern=r'/settopicmap (-?[0-9]+) (-?[0-9]+) (\d+) (\d+)'))
 async def set_topic_map_cmd(event):
+    """Manually link one source topic to one target topic"""
     if not is_admin(event.sender_id):
         return
     source_gid, target_gid, source_tid, target_tid = map(int, event.pattern_match.groups())
