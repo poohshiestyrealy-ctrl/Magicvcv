@@ -95,6 +95,9 @@ async def load_sources():
 
 
 
+
+
+
 async def save_mapping(source_id, target_id):
     try:
         supabase.table("mappings").upsert({"source_id": source_id, "target_id": target_id}, on_conflict="source_id").execute()
