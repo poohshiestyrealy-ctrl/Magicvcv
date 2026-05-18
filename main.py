@@ -329,17 +329,24 @@ async def help_handler(event):
     help_text = """
 **Yaga Bot Commands**
 
+**Topic Scraping:**
 `/addsource <src_id> <dst_id>` - Add scrape mapping
 `/removesource <src_id>` - Remove mapping
 `/listmappings` - Show all mappings
 `/resyncgroup <src_id> <dst_id>` - Sync topics between groups
 `/scrapegrouplike <src_id> [fresh]` - Scrape group with topics
 `/testmapping <src_id> <dst_id>` - Test if userbot can read topics
+
+**GIF/Short Scraping:**
+`/addauto gif|short <src> <dst>` - Add auto mapping
+`/removeauto gif|short <src>` - Remove auto mapping
+`/scrapegif <src_id>` - Scrape GIFs from source
+`/scrapeshort <src_id>` - Scrape shorts <60s from source
+
 `/stats` - Show stats
 `/help` - Show this message
 """
     await event.reply(help_text)
-
 
 
 
@@ -441,6 +448,54 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
 
+@client.on(events.NewMessage(pattern=r'/scrapegif (-?[0-9]+)'))
+async def scrape_gif(event):
+    if not is_admin(event.sender_id):
+        return
+    source_id = int(event.pattern_match.group(1))
+    target_id = CONFIG["auto_gif"].get(str(source_id))
+    if not target_id:
+        await event.reply(f"No GIF mapping for `{source_id}`. Use `/addauto gif <src> <dst>` first")
+        return
+    
+    msg = await event.reply("Scraping GIFs...")
+    count = 0
+    async for message in client.iter_messages(source_id, limit=500):
+        if is_gif(message):
+            try:
+                await client.send_file(int(target_id), message.media, caption="")
+                count += 1
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"GIF send failed: {e}")
+    
+    await msg.edit(f"Done. Sent {count} GIFs")
+
+@client.on(events.NewMessage(pattern=r'/scrapeshort (-?[0-9]+)'))
+async def scrape_short(event):
+    if not is_admin(event.sender_id):
+        return
+    source_id = int(event.pattern_match.group(1))
+    target_id = CONFIG["auto_short"].get(str(source_id))
+    if not target_id:
+        await event.reply(f"No short mapping for `{source_id}`. Use `/addauto short <src> <dst>` first")
+        return
+    
+    msg = await event.reply("Scraping shorts...")
+    count = 0
+    async for message in client.iter_messages(source_id, limit=500):
+        if is_video_message(message):
+            video_attr = get_video_attr(message)
+            if video_attr and video_attr.duration <= 60:
+                try:
+                    await client.send_file(int(target_id), message.media, caption="")
+                    count += 1
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error(f"Short send failed: {e}")
+    
+    await msg.edit(f"Done. Sent {count} shorts")
+
 @client.on(events.NewMessage(pattern=r'/addsource (-?[0-9]+) (-?[0-9]+)'))
 async def add_source(event):
     if not is_admin(event.sender_id):
@@ -468,6 +523,47 @@ async def remove_source(event):
     except Exception as e:
         await event.reply(f"Error: {e}")
 
+@client.on(events.NewMessage(pattern=r'/addauto (gif|short) (-?[0-9]+) (-?[0-9]+)'))
+async def add_auto(event):
+    if not is_admin(event.sender_id):
+        return
+    mode = event.pattern_match.group(1)
+    source_id = int(event.pattern_match.group(2))
+    target_id = int(event.pattern_match.group(3))
+    
+    try:
+        supabase.table("auto_mappings").upsert({
+            "source_id": source_id, 
+            "target_id": target_id, 
+            "mode": mode
+        }, on_conflict="source_id,mode").execute()
+        
+        if mode == "gif":
+            CONFIG["auto_gif"][str(source_id)] = str(target_id)
+        else:
+            CONFIG["auto_short"][str(source_id)] = str(target_id)
+            
+        await event.reply(f"Added {mode} mapping: `{source_id}` -> `{target_id}`")
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
+
+@client.on(events.NewMessage(pattern=r'/removeauto (gif|short) (-?[0-9]+)'))
+async def remove_auto(event):
+    if not is_admin(event.sender_id):
+        return
+    mode = event.pattern_match.group(1)
+    source_id = int(event.pattern_match.group(2))
+    
+    try:
+        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", mode).execute()
+        if mode == "gif":
+            CONFIG["auto_gif"].pop(str(source_id), None)
+        else:
+            CONFIG["auto_short"].pop(str(source_id), None)
+        await event.reply(f"Removed {mode} mapping for `{source_id}`")
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
+
 @client.on(events.NewMessage(pattern=r'/listmappings'))
 async def list_mappings(event):
     if not is_admin(event.sender_id):
@@ -484,7 +580,7 @@ async def list_mappings(event):
 async def stats(event):
     if not is_admin(event.sender_id):
         return
-    text = f"**Stats**\nScraped: {scraped_count}\nSkipped: {skipped_count}\nMappings: {len(CONFIG['sources'])}"
+    text = f"**Stats**\nScraped: {scraped_count}\nSkipped: {skipped_count}\nMappings: {len(CONFIG['sources'])}\nGIF Auto: {len(CONFIG['auto_gif'])}\nShort Auto: {len(CONFIG['auto_short'])}"
     await event.reply(text)
 
 async def main():
