@@ -249,6 +249,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
+
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -419,8 +420,9 @@ async def debug_topics(event):
     msg = await event.reply("Fetching topics...")
 
     try:
+        # Use positional args for compatibility
         res = await asyncio.wait_for(
-            client(GetForumTopicsRequest(channel=gid, limit=50)),
+            client(GetForumTopicsRequest(gid, 0, 0, 0, 50)),
             timeout=15
         )
         text = "**Topics seen by bot:**\n"
