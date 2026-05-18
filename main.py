@@ -68,6 +68,8 @@ def is_gif(message):
 
 
 
+
+
 async def load_sources():
     global CONFIG
     try:
@@ -247,8 +249,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
-
-
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -256,32 +256,52 @@ async def resync_group_fresh(event):
 
     source_id = int(event.pattern_match.group(1))
     target_id = int(event.pattern_match.group(2))
-    msg = await event.reply("🔄 Starting FRESH topic resync... Ignoring Supabase mapping.")
+    msg = await event.reply("🔄 Starting FRESH topic resync...")
+
+    # Get entities with timeout
+    try:
+        await msg.edit("📡 Getting source group...")
+        src_entity = await asyncio.wait_for(client.get_entity(source_id), timeout=10)
+    except asyncio.TimeoutError:
+        await msg.edit("❌ Timeout: Can't access source group. Open it once with the userbot account on Telegram Desktop.")
+        return
+    except Exception as e:
+        await msg.edit(f"❌ Source error: {e}")
+        return
 
     try:
-        src_entity = await client.get_entity(source_id)
-        tgt_entity = await client.get_entity(target_id)
+        await msg.edit("📡 Getting target group...")
+        tgt_entity = await asyncio.wait_for(client.get_entity(target_id), timeout=10)
+    except asyncio.TimeoutError:
+        await msg.edit("❌ Timeout: Can't access target group. Add userbot to group and open it once.")
+        return
     except Exception as e:
-        await msg.edit(f"❌ Can't access groups: {e}")
+        await msg.edit(f"❌ Target error: {e}")
         return
 
     if not getattr(src_entity, 'forum', False) or not getattr(tgt_entity, 'forum', False):
         await msg.edit("❌ Both groups need topics enabled.")
         return
 
-    # Get source topics
+    # Get source topics with timeout + max attempts
     all_topics = []
     offset_topic = 0
     offset_id = 0
-    while True:
+    max_attempts = 5
+
+    await msg.edit("📡 Fetching source topics...")
+    for attempt in range(max_attempts):
         try:
-            res = await client(GetForumTopicsRequest(
-                channel=src_entity,
-                offset_date=0,
-                offset_id=offset_id,
-                offset_topic=offset_topic,
-                limit=20,
-            ))
+            res = await asyncio.wait_for(
+                client(GetForumTopicsRequest(
+                    channel=src_entity,
+                    offset_date=0,
+                    offset_id=offset_id,
+                    offset_topic=offset_topic,
+                    limit=20,
+                )),
+                timeout=15
+            )
             if not res.topics:
                 break
             all_topics.extend(res.topics)
@@ -291,28 +311,51 @@ async def resync_group_fresh(event):
             offset_topic = last_topic.id
             offset_id = last_topic.top_message
             await asyncio.sleep(1.5)
+        except asyncio.TimeoutError:
+            await msg.edit("⏳ Timeout fetching source topics.")
+            return
         except Exception as e:
             await msg.edit(f"❌ Failed fetching source: {str(e)}")
             return
 
     src_topics = [t for t in all_topics if not getattr(t, 'deleted', False) and t.id!= 1]
+    if not src_topics:
+        await msg.edit("❌ No topics found in source.")
+        return
 
-    # Get target topics - FIX: exclude ID 1 and deleted topics
-    tgt_res = await client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100))
-    active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
+    await msg.edit(f"✅ Found **{len(src_topics)}** source topics. Checking target...")
 
-    # FIX: Use exact title matching, no lower().strip()
+    # Get target topics with timeout
+    try:
+        tgt_res = await asyncio.wait_for(
+            client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100)),
+            timeout=15
+        )
+        active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
+    except asyncio.TimeoutError:
+        await msg.edit("⏳ Timeout fetching target topics.")
+        return
+    except Exception as e:
+        await msg.edit(f"❌ Failed to fetch target topics: {e}")
+        return
+
+    # Exact title matching
     topic_map = {tt.title: tt.id for tt in active_topics}
 
+    # Archive topic
     archive_topic = next((tt for tt in active_topics if tt.title == "Archive"), None)
     if not archive_topic:
-        result = await client(CreateForumTopicRequest(channel=tgt_entity, title="Archive"))
-        archive_topic_id = None
-        for update in getattr(result, 'updates', []):
-            if hasattr(update, 'id') and isinstance(getattr(update, 'id', None), int):
-                archive_topic_id = update.id
-                break
-        await asyncio.sleep(2)
+        try:
+            result = await client(CreateForumTopicRequest(channel=tgt_entity, title="Archive"))
+            archive_topic_id = None
+            for update in getattr(result, 'updates', []):
+                if hasattr(update, 'id') and isinstance(getattr(update, 'id', None), int):
+                    archive_topic_id = update.id
+                    break
+            await asyncio.sleep(2)
+        except Exception as e:
+            await msg.edit(f"Failed to create Archive topic: {e}")
+            return
     else:
         archive_topic_id = archive_topic.id
 
@@ -327,7 +370,7 @@ async def resync_group_fresh(event):
     await msg.edit(f"Target has {len(active_topics)} active topics. Available slots: {available_slots}. Starting...")
 
     for t in src_topics:
-        title = t.title # exact match now
+        title = t.title
 
         if title in topic_map:
             new_mapping[str(t.id)] = topic_map[title]
@@ -365,7 +408,6 @@ async def resync_group_fresh(event):
             skipped += 1
 
     await save_topic_map(source_id, target_id, new_mapping)
-
     final_msg = f"**Fresh Resync Complete**\nCreated: `{created}`\nMapped existing: `{mapped}`\nSkipped to Archive: `{skipped}`\nActive topics: `{len(active_topics) + created}`/100"
     await msg.edit(final_msg)
 
@@ -377,7 +419,10 @@ async def debug_topics(event):
     msg = await event.reply("Fetching topics...")
 
     try:
-        res = await client(GetForumTopicsRequest(channel=gid, limit=50))
+        res = await asyncio.wait_for(
+            client(GetForumTopicsRequest(channel=gid, limit=50)),
+            timeout=15
+        )
         text = "**Topics seen by bot:**\n"
         for t in res.topics:
             deleted = getattr(t, 'deleted', False)
@@ -386,6 +431,8 @@ async def debug_topics(event):
         if len(text) > 4000:
             text = text[:4000] + "\n...truncated"
         await msg.edit(text)
+    except asyncio.TimeoutError:
+        await msg.edit("⏳ Timeout. Userbot not in group or Telegram blocking it.")
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
@@ -571,7 +618,6 @@ async def help_handler(event):
 `/clearmapping <src_id> <dst_id>` - Delete mapping from Supabase
 `/scrapegrouplike <src_id> [fresh]` - Scrape group with topics
 `/debugtopics <group_id>` - Show all topics bot sees in a group
-`/testmapping <src_id> <dst_id>` - Test if userbot can read topics
 
 **GIF/Short Scraping:**
 `/addauto gif|short <src> <dst>` - Add auto mapping
