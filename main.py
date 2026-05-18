@@ -250,6 +250,8 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
+
+
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -259,7 +261,6 @@ async def resync_group_fresh(event):
     target_id = int(event.pattern_match.group(2))
     msg = await event.reply("🔄 Starting FRESH topic resync...")
 
-    # Get entities with timeout
     try:
         await msg.edit("📡 Getting source group...")
         src_entity = await asyncio.wait_for(client.get_entity(source_id), timeout=10)
@@ -284,11 +285,10 @@ async def resync_group_fresh(event):
         await msg.edit("❌ Both groups need topics enabled.")
         return
 
-    # Get source topics with timeout + max attempts
     all_topics = []
     offset_topic = 0
     offset_id = 0
-    max_attempts = 5
+    max_attempts = 10
 
     await msg.edit("📡 Fetching source topics...")
     for attempt in range(max_attempts):
@@ -326,7 +326,11 @@ async def resync_group_fresh(event):
 
     await msg.edit(f"✅ Found **{len(src_topics)}** source topics. Checking target...")
 
-    # Get target topics with timeout
+    # No title matching - create 1 topic per source title
+    new_mapping = {}
+    created = 0
+    skipped = 0
+
     try:
         tgt_res = await asyncio.wait_for(
             client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100)),
@@ -340,10 +344,6 @@ async def resync_group_fresh(event):
         await msg.edit(f"❌ Failed to fetch target topics: {e}")
         return
 
-    # Exact title matching
-    topic_map = {tt.title: tt.id for tt in active_topics}
-
-    # Archive topic
     archive_topic = next((tt for tt in active_topics if tt.title == "Archive"), None)
     if not archive_topic:
         try:
@@ -363,21 +363,9 @@ async def resync_group_fresh(event):
     await save_archive_topic_id(source_id, target_id, archive_topic_id)
 
     available_slots = 100 - len(active_topics)
-    created = 0
-    mapped = 0
-    skipped = 0
-    new_mapping = {}
-
     await msg.edit(f"Target has {len(active_topics)} active topics. Available slots: {available_slots}. Starting...")
 
     for t in src_topics:
-        title = t.title
-
-        if title in topic_map:
-            new_mapping[str(t.id)] = topic_map[title]
-            mapped += 1
-            continue
-
         if created >= available_slots:
             new_mapping[str(t.id)] = archive_topic_id
             skipped += 1
@@ -386,7 +374,7 @@ async def resync_group_fresh(event):
         try:
             result = await client(CreateForumTopicRequest(
                 channel=tgt_entity,
-                title=title[:128],
+                title=t.title[:128],
                 icon_emoji_id=getattr(t, 'icon_emoji_id', None)
             ))
             new_id = None
@@ -396,7 +384,6 @@ async def resync_group_fresh(event):
                     break
 
             if new_id:
-                topic_map[title] = new_id
                 new_mapping[str(t.id)] = new_id
                 created += 1
             await asyncio.sleep(3)
@@ -409,34 +396,43 @@ async def resync_group_fresh(event):
             skipped += 1
 
     await save_topic_map(source_id, target_id, new_mapping)
-    final_msg = f"**Fresh Resync Complete**\nCreated: `{created}`\nMapped existing: `{mapped}`\nSkipped to Archive: `{skipped}`\nActive topics: `{len(active_topics) + created}`/100"
+    final_msg = f"**Fresh Resync Complete**\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\nActive topics: `{len(active_topics) + created}`/100"
     await msg.edit(final_msg)
 
-@client.on(events.NewMessage(pattern=r'/debugtopics (-?[0-9]+)'))
+@client.on(events.NewMessage(pattern=r'/debugtopics (-?[0-9]+)(?:\s+(-?[0-9]+))?'))
 async def debug_topics(event):
     if not is_admin(event.sender_id):
         return
-    gid = int(event.pattern_match.group(1))
+
+    args = event.pattern_match.groups()
+    gid1 = int(args[0])
+    gid2 = int(args[1]) if args[1] else None
+
     msg = await event.reply("Fetching topics...")
 
-    try:
-        # Use positional args for compatibility
-        res = await asyncio.wait_for(
-            client(GetForumTopicsRequest(gid, 0, 0, 0, 50)),
-            timeout=15
-        )
-        text = "**Topics seen by bot:**\n"
-        for t in res.topics:
-            deleted = getattr(t, 'deleted', False)
-            text += f"ID:`{t.id}` Deleted:`{deleted}` Title:`{t.title}`\n"
+    async def fetch_and_format(gid, label):
+        try:
+            res = await asyncio.wait_for(
+                client(GetForumTopicsRequest(channel=gid, limit=200)),
+                timeout=15
+            )
+            text = f"\n**{label} {gid}**\nTotal: {len(res.topics)}\n"
+            for t in res.topics:
+                deleted = getattr(t, 'deleted', False)
+                text += f"ID:`{t.id}` Deleted:`{deleted}` Title:`{t.title}`\n"
+            return text
+        except Exception as e:
+            return f"\n**{label} {gid}**\nError: {e}\n"
 
-        if len(text) > 4000:
-            text = text[:4000] + "\n...truncated"
-        await msg.edit(text)
-    except asyncio.TimeoutError:
-        await msg.edit("⏳ Timeout. Userbot not in group or Telegram blocking it.")
-    except Exception as e:
-        await msg.edit(f"Error: {e}")
+    text = "**Topics seen by bot:**"
+    text += await fetch_and_format(gid1, "Group 1")
+
+    if gid2:
+        text += await fetch_and_format(gid2, "Group 2")
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n...truncated"
+    await msg.edit(text)
 
 @client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
 async def clear_mapping(event):
@@ -616,10 +612,10 @@ async def help_handler(event):
 `/addsource <src_id> <dst_id>` - Add scrape mapping
 `/removesource <src_id>` - Remove mapping
 `/listmappings` - Show all mappings
-`/resyncgroupfresh <src_id> <dst_id>` - Fresh sync ignoring Supabase, up to 100 topics
+`/resyncgroupfresh <src_id> <dst_id>` - Fresh sync ignoring Supabase, creates 1 topic per source topic
 `/clearmapping <src_id> <dst_id>` - Delete mapping from Supabase
 `/scrapegrouplike <src_id> [fresh]` - Scrape group with topics
-`/debugtopics <group_id>` - Show all topics bot sees in a group
+`/debugtopics <group_id> [group_id2]` - Show topics bot sees in 1 or 2 groups
 
 **GIF/Short Scraping:**
 `/addauto gif|short <src> <dst>` - Add auto mapping
