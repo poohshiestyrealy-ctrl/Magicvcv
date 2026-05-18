@@ -296,11 +296,11 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                     pass
                 await save_checkpoint(f"group_{source_id}", message.id)
 
-            if is_video_message(message):
-                if message.file.size > MAX_FILE_SIZE:
-                    skipped_count += 1
-                    continue
+            if message.file and message.file.size > MAX_FILE_SIZE:
+                skipped_count += 1
+                continue
 
+            if is_video_message(message):
                 video_attr = get_video_attr(message)
                 reply_to = None
 
@@ -332,7 +332,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
-
 
 
 
