@@ -193,17 +193,45 @@ async def resync_group_topics(event):
 
     topic_map = await get_topic_map(source_id, target_id)
 
-    try:
-        src_topics = await client(GetForumTopicsRequest(channel=source_id, offset_date=0, offset_id=0, offset_topic=0, limit=200))
-    except Exception as e:
-        await msg.edit(f"Failed to get source topics: {e}")
-        return
+    # Fetch ALL topics with pagination
+    all_topics = []
+    offset_topic = 0
+    offset_id = 0
 
-    if not src_topics.topics:
+    while True:
+        try:
+            res = await client(GetForumTopicsRequest(
+                channel=source_id,
+                offset_date=0,
+                offset_id=offset_id,
+                offset_topic=offset_topic,
+                limit=100
+            ))
+        except Exception as e:
+            await msg.edit(f"Failed to get source topics: {e}")
+            return
+
+        if not res.topics:
+            break
+
+        all_topics.extend(res.topics)
+
+        if len(res.topics) < 100:
+            break
+
+        # Set offsets for next page
+        last_topic = res.topics[-1]
+        offset_topic = last_topic.id
+        offset_id = last_topic.top_message
+        await asyncio.sleep(1) # avoid flood
+
+    src_topics = all_topics
+
+    if not src_topics:
         await msg.edit("Source has no topics.")
         return
 
-    await msg.edit(f"Found {len(src_topics.topics)} topic(s). Syncing...")
+    await msg.edit(f"Found {len(src_topics)} topic(s). Syncing...")
 
     created = 0
     updated = 0
@@ -231,7 +259,7 @@ async def resync_group_topics(event):
         logger.error(f"Failed to create/find Archive topic: {e}")
 
     # Map topics
-    for t in src_topics.topics:
+    for t in src_topics:
         if getattr(t, 'deleted', False) or t.id == 1:
             skipped += 1
             continue
@@ -415,7 +443,6 @@ async def test_mapping(event):
         await asyncio.sleep(2)
 
     await event.reply("Check those topics in target group. If messages landed right, mapping works.")
-
 
 
 
