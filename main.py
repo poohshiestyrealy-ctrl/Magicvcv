@@ -70,11 +70,6 @@ def is_gif(message):
 
 
 
-
-
-
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -247,8 +242,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
-
-
 
 
 
@@ -525,6 +518,10 @@ async def scrape_group_like(event):
 
     msg = await event.reply("Starting group scrape...")
     await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
+
+
+
+
 
 
 
