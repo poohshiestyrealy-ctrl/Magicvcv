@@ -161,33 +161,6 @@ async def save_topic_map(source_id, target_id, mapping):
         logger.error(f"Topic map save failed: {e}")
         return False
 
-@client.on(events.NewMessage(pattern=r'/mapmain (-?[0-9]+) (-?[0-9]+)'))
-async def map_main(event):
-    if not is_admin(event.sender_id):
-        return
-
-    source_id = int(event.pattern_match.group(1))
-    target_id = int(event.pattern_match.group(2))
-    msg = await event.reply("Mapping main topics...")
-
-    topic_map = await get_topic_map(source_id, target_id)
-
-    try:
-        src_topics = await client(GetForumTopicsRequest(source_id, 0, 0, 0, 100))
-        tgt_topics = await client(GetForumTopicsRequest(target_id, 0, 0, 0, 100))
-
-        src_main_id = next((t.id for t in src_topics.topics if t.id == 1), None)
-        tgt_main_id = next((t.id for t in tgt_topics.topics if t.id == 1), None)
-
-        if src_main_id is not None and tgt_main_id is not None:
-            topic_map[str(src_main_id)] = tgt_main_id
-            await save_topic_map(source_id, target_id, topic_map)
-            await msg.edit(f"✓ Mapped source topic 1 to target topic 1\n#MAIN Room messages will now go to #General")
-        else:
-            await msg.edit("Couldn't find topic 1 in one of the groups.")
-    except Exception as e:
-        await msg.edit(f"Failed: {e}")
-
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
@@ -302,10 +275,17 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
             if is_video_message(message):
                 video_attr = get_video_attr(message)
-                reply_to = None
 
+                # Determine target topic
+                reply_to = None
                 if getattr(message, 'reply_to_topic_id', None):
                     reply_to = topic_map.get(str(message.reply_to_topic_id))
+                else:
+                    reply_to = 1 # No topic = send to General
+
+                # Skip if it was actually in Main topic 1
+                if reply_to == 1 and getattr(message, 'reply_to_topic_id', None) == 1:
+                    continue
 
                 try:
                     await client.send_file(
@@ -332,7 +312,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
-
 
 
 
