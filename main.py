@@ -69,11 +69,6 @@ def is_gif(message):
 
 
 
-
-
-
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -255,7 +250,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
-
 @client.on(events.NewMessage(pattern=r'/start'))
 async def start_cmd(event):
     if not is_admin(event.sender_id):
@@ -277,6 +271,8 @@ async def help_handler(event):
 `/resyncgroupfresh <src_id> <dst_id>` - Create 1 topic in target for every topic in source
 `/clearmapping <src_id> <dst_id>` - Delete the topic mapping
 `/debugtopics <group_id> [group_id2]` - Check if bot can see topics
+`/diag <group_id>` - Run diagnostics to check why topics aren't loading
+`/testmapping <src_id> <dst_id>` - Test if mapping exists
 
 **2. Scrape Groups:**
 `/scrapegrouplike <src_id> [fresh]` - Start scraping. Add 'fresh' to start from beginning
@@ -364,7 +360,6 @@ async def resync_group_fresh(event):
         await msg.edit("❌ Both groups need topics enabled.")
         return
 
-    # Fetch source topics with retry
     all_topics = []
     offset_topic = 0
     offset_id = 0
@@ -510,6 +505,56 @@ async def debug_topics(event):
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
+@client.on(events.NewMessage(pattern=r'/diag (-?[0-9]+)'))
+async def diag_group(event):
+    """Diagnostic command to check why topics aren't loading"""
+    if not is_admin(event.sender_id):
+        return
+    gid = int(event.pattern_match.group(1))
+    msg = await event.reply(f"Running diagnostics on `{gid}`...")
+
+    try:
+        entity = await asyncio.wait_for(client.get_entity(gid), timeout=10)
+        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\nType: `{type(entity).__name__}`\nTitle: `{getattr(entity, 'title', 'N/A')}`\nForum/Topics: `{getattr(entity, 'forum', False)}`")
+    except asyncio.TimeoutError:
+        await msg.edit(f"**Step 1/2**: get_entity\n❌ TIMEOUT\nUserbot can't access this group.\nFix: Open the group once in Telegram Desktop.")
+        return
+    except ValueError:
+        await msg.edit(f"**Step 1/2**: get_entity\n❌ NOT FOUND\nUserbot is not a member of this group.")
+        return
+    except Exception as e:
+        await msg.edit(f"**Step 1/2**: get_entity\n❌ ERROR\n{e}")
+        return
+
+    try:
+        res = await asyncio.wait_for(
+            client(GetForumTopicsRequest(channel=entity, offset_date=0, offset_id=0, offset_topic=0, limit=5)),
+            timeout=15
+        )
+        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\n✅ OK\nTopics found: `{len(res.topics)}`\n\nIf this works, `/resyncgroupfresh` should work too.")
+    except asyncio.TimeoutError:
+        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\n❌ TIMEOUT\nTelegram not returning topics.\nFix: Open the group in Telegram Desktop, wait 10s, try again.")
+    except Exception as e:
+        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\n❌ FAILED\n{e}")
+
+@client.on(events.NewMessage(pattern=r'/testmapping (-?[0-9]+) (-?[0-9]+)'))
+async def test_mapping(event):
+    """Test if topic mapping exists and works"""
+    if not is_admin(event.sender_id):
+        return
+    src_id = int(event.pattern_match.group(1))
+    dst_id = int(event.pattern_match.group(2))
+
+    topic_map = await get_topic_map(src_id, dst_id)
+    archive_id = await get_archive_topic_id(src_id, dst_id)
+
+    if not topic_map:
+        await event.reply(f"❌ No mapping found for `{src_id}` -> `{dst_id}`\nRun `/resyncgroupfresh {src_id} {dst_id}` first")
+        return
+
+    mapped_count = len(topic_map)
+    await event.reply(f"✅ Mapping exists\nMapped topics: `{mapped_count}`\nArchive topic: `{archive_id}`\n\nSample: `{list(topic_map.items())[:3]}`")
+
 @client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
 async def clear_mapping(event):
     if not is_admin(event.sender_id):
@@ -537,6 +582,10 @@ async def scrape_group_like(event):
 
     msg = await event.reply("Starting group scrape...")
     await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
+
+
+
+
 
 
 
