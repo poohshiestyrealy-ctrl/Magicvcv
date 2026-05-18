@@ -68,9 +68,6 @@ def is_gif(message):
 
 
 
-
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -253,10 +250,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
-
-
-
-
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
@@ -265,6 +258,9 @@ async def resync_group_topics(event):
     source_id = int(event.pattern_match.group(1))
     target_id = int(event.pattern_match.group(2))
     msg = await event.reply("🔄 Starting topic resync...")
+
+    # DEBUG LINE - remove after testing
+    await msg.edit("DEBUG: Running new code v2")
 
     try:
         src_entity = await client.get_entity(source_id)
@@ -402,6 +398,156 @@ async def resync_group_topics(event):
         msg_text += f"\nArchive topic ID: `{archive_topic_id}`"
     await msg.edit(msg_text)
 
+@client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
+async def resync_group_fresh(event):
+    if not is_admin(event.sender_id):
+        return
+
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+    msg = await event.reply("🔄 Starting FRESH topic resync... Ignoring Supabase mapping.")
+
+    try:
+        src_entity = await client.get_entity(source_id)
+    except Exception as e:
+        await msg.edit(f"❌ Can't access source group: {e}")
+        return
+
+    if not getattr(src_entity, 'forum', False):
+        await msg.edit("❌ Source group doesn't have topics enabled.")
+        return
+
+    all_topics = []
+    offset_topic = 0
+    offset_id = 0
+    max_attempts = 5
+
+    await msg.edit("📡 Fetching source topics...")
+    for attempt in range(max_attempts):
+        try:
+            res = await asyncio.wait_for(
+                client(GetForumTopicsRequest(
+                    channel=src_entity,
+                    offset_date=0,
+                    offset_id=offset_id,
+                    offset_topic=offset_topic,
+                    limit=20,
+                )),
+                timeout=15
+            )
+            if not res.topics:
+                break
+            all_topics.extend(res.topics)
+            if len(res.topics) < 20:
+                break
+            last_topic = res.topics[-1]
+            offset_topic = last_topic.id
+            offset_id = last_topic.top_message
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            await msg.edit(f"❌ Failed: {str(e)}")
+            return
+
+    src_topics = [t for t in all_topics if not getattr(t, 'deleted', False) and t.id!= 1]
+    await msg.edit(f"✅ Found **{len(src_topics)}** source topics. Checking target...")
+
+    try:
+        tgt_res = await client(GetForumTopicsRequest(channel=target_id, offset_date=0, offset_id=0, offset_topic=0, limit=100))
+        active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False)]
+    except Exception as e:
+        await msg.edit(f"❌ Failed to fetch target topics: {e}")
+        return
+
+    topic_map = {tt.title.lower().strip(): tt.id for tt in active_topics}
+
+    archive_topic = next((tt for tt in active_topics if tt.title.lower() == "archive"), None)
+    if not archive_topic:
+        try:
+            result = await client(CreateForumTopicRequest(channel=target_id, title="Archive"))
+            for update in getattr(result, 'updates', []):
+                if hasattr(update, 'id') and isinstance(getattr(update, 'id', None), int):
+                    archive_topic_id = update.id
+                    break
+            await asyncio.sleep(2)
+        except Exception as e:
+            await msg.edit(f"Failed to create Archive topic: {e}")
+            return
+    else:
+        archive_topic_id = archive_topic.id
+
+    await save_archive_topic_id(source_id, target_id, archive_topic_id)
+
+    available_slots = 100 - len(active_topics)
+    created = 0
+    mapped = 0
+    skipped = 0
+    new_mapping = {}
+
+    await msg.edit(f"Target has {len(active_topics)} active topics. Available slots: {available_slots}. Starting...")
+
+    for t in src_topics:
+        title_key = t.title.lower().strip()
+
+        if title_key in topic_map:
+            new_mapping[str(t.id)] = topic_map[title_key]
+            mapped += 1
+            continue
+
+        if created >= available_slots:
+            new_mapping[str(t.id)] = archive_topic_id
+            skipped += 1
+            continue
+
+        try:
+            result = await client(CreateForumTopicRequest(
+                channel=target_id,
+                title=t.title[:128],
+                icon_emoji_id=getattr(t, 'icon_emoji_id', None)
+            ))
+            new_id = None
+            for update in getattr(result, 'updates', []):
+                if hasattr(update, 'id') and isinstance(getattr(update, 'id', None), int):
+                    new_id = update.id
+                    break
+
+            if new_id:
+                topic_map[title_key] = new_id
+                new_mapping[str(t.id)] = new_id
+                created += 1
+            await asyncio.sleep(3)
+
+        except FloodWaitError as e:
+            await asyncio.sleep(e.seconds + 2)
+        except Exception as e:
+            logger.error(f"Topic create failed for {t.title}: {e}")
+            new_mapping[str(t.id)] = archive_topic_id
+            skipped += 1
+
+    await save_topic_map(source_id, target_id, new_mapping)
+
+    final_msg = f"**Fresh Resync Complete**\nCreated: `{created}`\nMapped existing: `{mapped}`\nSkipped to Archive: `{skipped}`\nActive topics: `{len(active_topics) + created}`/100"
+    await msg.edit(final_msg)
+
+@client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
+async def clear_mapping(event):
+    if not is_admin(event.sender_id):
+        return
+
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+    msg = await event.reply(f"Clearing mapping for `{source_id}` -> `{target_id}`...")
+
+    try:
+        res = supabase.table("group_topic_map").delete().eq("source_id", source_id).eq("target_id", target_id).execute()
+
+        if not res.data:
+            await msg.edit("No mapping found for that pair.")
+            return
+
+        await msg.edit(f"**Mapping cleared**\nBot will treat this as a fresh pair now.\n\nUse `/resyncgroupfresh {source_id} {target_id}` to rebuild.")
+    except Exception as e:
+        await msg.edit(f"Failed to clear mapping: {e}")
+
 @client.on(events.NewMessage(pattern=r'/testmapping (-?[0-9]+) (-?[0-9]+)'))
 async def test_mapping(event):
     if not is_admin(event.sender_id):
@@ -428,7 +574,9 @@ async def help_handler(event):
 `/addsource <src_id> <dst_id>` - Add scrape mapping
 `/removesource <src_id>` - Remove mapping
 `/listmappings` - Show all mappings
-`/resyncgroup <src_id> <dst_id>` - Sync topics between groups
+`/resyncgroup <src_id> <dst_id>` - Sync topics using Supabase mapping
+`/resyncgroupfresh <src_id> <dst_id>` - Fresh sync ignoring Supabase, up to 100 topics
+`/clearmapping <src_id> <dst_id>` - Delete mapping from Supabase
 `/scrapegrouplike <src_id> [fresh]` - Scrape group with topics
 `/testmapping <src_id> <dst_id>` - Test if userbot can read topics
 
