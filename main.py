@@ -137,9 +137,12 @@ async def check_access(chat_id):
 
 async def get_topic_map(source_id, target_id):
     try:
-        res = supabase.table("group_topic_map").select("mapping").eq("source_id", source_id).eq("target_id", target_id).single().execute()
-        return res.data["mapping"] if res.data else {}
-    except:
+        res = supabase.table("group_topic_map").select("mapping").eq("source_id", source_id).eq("target_id", target_id).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]["mapping"] if res.data[0]["mapping"] else {}
+        return {}
+    except Exception as e:
+        logger.error(f"get_topic_map error: {e}")
         return {}
 
 async def save_topic_map(source_id, target_id, mapping):
@@ -168,10 +171,14 @@ async def save_archive_topic_id(source_id, target_id, archive_topic_id):
 
 async def get_archive_topic_id(source_id, target_id):
     try:
-        res = supabase.table("group_topic_map").select("archive_topic_id").eq("source_id", source_id).eq("target_id", target_id).single().execute()
-        return res.data["archive_topic_id"] if res.data and res.data.get("archive_topic_id") else None
-    except:
+        res = supabase.table("group_topic_map").select("archive_topic_id").eq("source_id", source_id).eq("target_id", target_id).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]["archive_topic_id"] if res.data[0].get("archive_topic_id") else None
         return None
+    except Exception as e:
+        logger.error(f"get_archive_topic_id error: {e}")
+        return None
+
 
 
 
@@ -453,6 +460,8 @@ async def test_mapping(event):
         await asyncio.sleep(2)
 
     await event.reply("Check those topics in target group. If messages landed right, mapping works.")
+
+
 
 
 
