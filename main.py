@@ -74,13 +74,6 @@ def is_gif(message):
 
 
 
-
-
-
-
-
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -263,11 +256,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
-
-
-
-
-
 @client.on(events.NewMessage(pattern=r'/start'))
 async def start_cmd(event):
     if not is_admin(event.sender_id):
@@ -289,7 +277,6 @@ async def help_handler(event):
 `/resyncgroupfresh <src_id> <dst_id>` - Create 1 topic in target for every topic in source
 `/clearmapping <src_id> <dst_id>` - Delete the topic mapping
 `/debugtopics <group_id> [group_id2]` - Check if bot can see topics
-`/diag <group_id>` - Run diagnostics to check why topics aren't loading
 
 **2. Scrape Groups:**
 `/scrapegrouplike <src_id> [fresh]` - Start scraping. Add 'fresh' to start from beginning
@@ -377,6 +364,7 @@ async def resync_group_fresh(event):
         await msg.edit("❌ Both groups need topics enabled.")
         return
 
+    # Fetch source topics with retry
     all_topics = []
     offset_topic = 0
     offset_id = 0
@@ -421,7 +409,13 @@ async def resync_group_fresh(event):
 
     try:
         tgt_res = await asyncio.wait_for(
-            client(GetForumTopicsRequest(channel=tgt_entity, limit=100)),
+            client(GetForumTopicsRequest(
+                channel=tgt_entity,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=100
+            )),
             timeout=20
         )
         active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
@@ -486,14 +480,26 @@ async def debug_topics(event):
 
     try:
         entity1 = await asyncio.wait_for(client.get_entity(gid1), timeout=15)
-        res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity1, limit=200)), timeout=20)
+        res = await asyncio.wait_for(client(GetForumTopicsRequest(
+            channel=entity1,
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=200
+        )), timeout=20)
         text = f"**Group {gid1}**\nTotal: {len(res.topics)}\n"
         for t in res.topics[:50]:
             text += f"ID:`{t.id}` Title:`{t.title}`\n"
 
         if gid2:
             entity2 = await asyncio.wait_for(client.get_entity(gid2), timeout=15)
-            res2 = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity2, limit=200)), timeout=20)
+            res2 = await asyncio.wait_for(client(GetForumTopicsRequest(
+                channel=entity2,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=200
+            )), timeout=20)
             text += f"\n**Group {gid2}**\nTotal: {len(res2.topics)}\n"
             for t in res2.topics[:50]:
                 text += f"ID:`{t.id}` Title:`{t.title}`\n"
@@ -503,38 +509,6 @@ async def debug_topics(event):
         await msg.edit("❌ Timeout. Open the group once in Telegram Desktop with the userbot account.")
     except Exception as e:
         await msg.edit(f"Error: {e}")
-
-@client.on(events.NewMessage(pattern=r'/diag (-?[0-9]+)'))
-async def diag_group(event):
-    """Diagnostic command to check why topics aren't loading"""
-    if not is_admin(event.sender_id):
-        return
-    gid = int(event.pattern_match.group(1))
-    msg = await event.reply(f"Running diagnostics on `{gid}`...")
-
-    try:
-        entity = await asyncio.wait_for(client.get_entity(gid), timeout=10)
-        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\nType: `{type(entity).__name__}`\nTitle: `{getattr(entity, 'title', 'N/A')}`\nForum/Topics: `{getattr(entity, 'forum', False)}`")
-    except asyncio.TimeoutError:
-        await msg.edit(f"**Step 1/2**: get_entity\n❌ TIMEOUT\nUserbot can't access this group.\nFix: Open the group once in Telegram Desktop.")
-        return
-    except ValueError:
-        await msg.edit(f"**Step 1/2**: get_entity\n❌ NOT FOUND\nUserbot is not a member of this group.")
-        return
-    except Exception as e:
-        await msg.edit(f"**Step 1/2**: get_entity\n❌ ERROR\n{e}")
-        return
-
-    try:
-        res = await asyncio.wait_for(
-            client(GetForumTopicsRequest(channel=entity, limit=5)),
-            timeout=15
-        )
-        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\n✅ OK\nTopics found: `{len(res.topics)}`\n\nIf this works, `/resyncgroupfresh` should work too.")
-    except asyncio.TimeoutError:
-        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\n❌ TIMEOUT\nTelegram not returning topics.\nFix: Open the group in Telegram Desktop, wait 10s, try again.")
-    except Exception as e:
-        await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\n❌ FAILED\n{e}")
 
 @client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
 async def clear_mapping(event):
@@ -563,13 +537,6 @@ async def scrape_group_like(event):
 
     msg = await event.reply("Starting group scrape...")
     await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
-
-
-
-
-
-
-
 
 
 
@@ -683,7 +650,13 @@ async def map_archive_topic(event):
     msg = await event.reply("Checking Archive topic...")
     try:
         entity = await asyncio.wait_for(client.get_entity(source_id), timeout=15)
-        topics = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity, limit=200)), timeout=20)
+        topics = await asyncio.wait_for(client(GetForumTopicsRequest(
+            channel=entity,
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=200
+        )), timeout=20)
         archive_topic_id = None
         for t in topics.topics:
             if getattr(t, 'title', '').lower() == 'archive':
