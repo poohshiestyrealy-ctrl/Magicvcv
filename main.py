@@ -182,6 +182,11 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
+import asyncio
+import random
+from telethon.tl.functions.channels import GetForumTopicsRequest, CreateForumTopicRequest
+from telethon.errors.rpcerrorlist import FloodWaitError, ChatAdminRequiredError
+
 @client.on(events.NewMessage(pattern=r'/resyncgroup (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_topics(event):
     if not is_admin(event.sender_id):
@@ -193,22 +198,32 @@ async def resync_group_topics(event):
 
     topic_map = await get_topic_map(source_id, target_id)
 
-    # Fetch ALL topics with pagination
+    # Fetch ALL topics with pagination + timeout
     all_topics = []
     offset_topic = 0
     offset_id = 0
 
     while True:
         try:
-            res = await client(GetForumTopicsRequest(
-                channel=source_id,
-                offset_date=0,
-                offset_id=offset_id,
-                offset_topic=offset_topic,
-                limit=100
-            ))
+            res = await asyncio.wait_for(
+                client(GetForumTopicsRequest(
+                    channel=source_id,
+                    offset_date=0,
+                    offset_id=offset_id,
+                    offset_topic=offset_topic,
+                    limit=100
+                )),
+                timeout=30
+            )
+        except asyncio.TimeoutError:
+            await msg.edit("Timed out fetching topics. Bot probably isn't admin in source group.")
+            return
+        except ChatAdminRequiredError:
+            await msg.edit("Error: Bot needs to be admin in source group to read topics.")
+            return
         except Exception as e:
-            await msg.edit(f"Failed to get source topics: {e}")
+            await msg.edit(f"Failed to get source topics: {str(e)}")
+            logger.error(f"GetForumTopicsRequest failed: {e}")
             return
 
         if not res.topics:
@@ -219,16 +234,15 @@ async def resync_group_topics(event):
         if len(res.topics) < 100:
             break
 
-        # Set offsets for next page
         last_topic = res.topics[-1]
         offset_topic = last_topic.id
         offset_id = last_topic.top_message
-        await asyncio.sleep(1) # avoid flood
+        await asyncio.sleep(1)
 
     src_topics = all_topics
 
     if not src_topics:
-        await msg.edit("Source has no topics.")
+        await msg.edit("Source has no topics or bot can't access them.")
         return
 
     await msg.edit(f"Found {len(src_topics)} topic(s). Syncing...")
@@ -237,7 +251,7 @@ async def resync_group_topics(event):
     updated = 0
     skipped = 0
 
-    # Always create/find Archive topic first
+    # Create or find Archive topic
     archive_topic_id = None
     try:
         tgt_topics = await client(GetForumTopicsRequest(channel=target_id, offset_date=0, offset_id=0, offset_topic=0, limit=100))
@@ -257,6 +271,8 @@ async def resync_group_topics(event):
         await save_archive_topic_id(source_id, target_id, archive_topic_id)
     except Exception as e:
         logger.error(f"Failed to create/find Archive topic: {e}")
+        await msg.edit(f"Failed to create Archive topic: {e}")
+        return
 
     # Map topics
     for t in src_topics:
