@@ -69,7 +69,6 @@ def is_gif(message):
 
 
 
-
 async def load_sources():
     global CONFIG
     try:
@@ -250,8 +249,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
-
-
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -326,7 +323,6 @@ async def resync_group_fresh(event):
 
     await msg.edit(f"✅ Found **{len(src_topics)}** source topics. Checking target...")
 
-    # No title matching - create 1 topic per source title
     new_mapping = {}
     created = 0
     skipped = 0
@@ -600,40 +596,192 @@ async def stats(event):
     text = f"**Stats**\nScraped: {scraped_count}\nSkipped: {skipped_count}\nMappings: {len(CONFIG['sources'])}\nGIF Auto: {len(CONFIG['auto_gif'])}\nShort Auto: {len(CONFIG['auto_short'])}"
     await event.reply(text)
 
-@client.on(events.NewMessage(pattern=r'/help'))
-async def help_handler(event):
+# ==================== NEW ARCHIVE REMAP FEATURES ====================
+
+@client.on(events.NewMessage(pattern=r'/maparchive (-?[0-9]+)'))
+async def map_archive_topic(event):
+    """Step 1: Check if Archive topic exists in source group."""
     if not is_admin(event.sender_id):
         return
 
-    help_text = """
-**Yaga Bot Commands**
+    source_id = int(event.pattern_match.group(1))
+    msg = await event.reply("Checking Archive topic...")
 
-**Topic Scraping:**
-`/addsource <src_id> <dst_id>` - Add scrape mapping
-`/removesource <src_id>` - Remove mapping
-`/listmappings` - Show all mappings
-`/resyncgroupfresh <src_id> <dst_id>` - Fresh sync ignoring Supabase, creates 1 topic per source topic
-`/clearmapping <src_id> <dst_id>` - Delete mapping from Supabase
-`/scrapegrouplike <src_id> [fresh]` - Scrape group with topics
-`/debugtopics <group_id> [group_id2]` - Show topics bot sees in 1 or 2 groups
+    try:
+        topics = await client(GetForumTopicsRequest(channel=source_id, limit=200))
+        archive_topic_id = None
+        for t in topics.topics:
+            if getattr(t, 'title', '').lower() == 'archive':
+                archive_topic_id = t.id
+                break
 
-**GIF/Short Scraping:**
-`/addauto gif|short <src> <dst>` - Add auto mapping
-`/removeauto gif|short <src>` - Remove auto mapping
-`/scrapegif <src_id>` - Scrape GIFs from source
-`/scrapeshort <src_id>` - Scrape shorts <60s from source
+        if not archive_topic_id:
+            await msg.edit("❌ No Archive topic found in this group.")
+            return
 
-`/stats` - Show stats
-`/help` - Show this message
-"""
-    await event.reply(help_text)
+        await msg.edit(f"✅ Found Archive topic ID: `{archive_topic_id}`\n\nNext run:\n`/remaparchive {source_id} <target_id>`")
+    except Exception as e:
+        await msg.edit(f"Error: {e}")
 
-async def main():
-    await load_sources()
-    await client.start()
-    me = await client.get_me()
-    await send_log(f"Bot started as {me.first_name}")
-    await client.run_until_disconnected()
+@client.on(events.NewMessage(pattern=r'/remaparchive (-?[0-9]+) (-?[0-9]+)( --reset)?'))
+async def remap_archive(event):
+    """Step 2: Move messages from Archive to target group. Creates topics if missing. Resumable."""
+    if not is_admin(event.sender_id):
+        return
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    source_group_id = int(event.pattern_match.group(1))
+    target_group_id = int(event.pattern_match.group(2))
+    reset_flag = event.pattern_match.group(3) is not None
+    job_key = f"{source_group_id}:{target_group_id}"
+
+    msg = await event.reply("Starting remap from Archive...")
+
+    try:
+        perms = await client.get_permissions(target_group_id, await client.get_me())
+        if not perms.create_topics:
+            await msg.edit("❌ Userbot needs 'Manage Topics' permission in the target group.")
+            return
+    except Exception as e:
+        await msg.edit(f"Error checking permissions: {e}")
+        return
+
+    try:
+        topics = await client(GetForumTopicsRequest(channel=source_group_id, limit=200))
+        archive_topic_id = None
+        for t in topics.topics:
+            if getattr(t, 'title', '').lower() == 'archive':
+                archive_topic_id = t.id
+                break
+        if not archive_topic_id:
+            await msg.edit("❌ No Archive topic found. Run `/maparchive` first.")
+            return
+    except Exception as e:
+        await msg.edit(f"Error fetching topics: {e}")
+        return
+
+    if reset_flag:
+        await supabase.table("remap_jobs").delete().eq("job_key", job_key).execute()
+        await msg.edit("Checkpoint cleared. Starting from the beginning...")
+        last_processed = 0
+    else:
+        resume_row = await supabase.table("remap_jobs") \
+       .select("last_message_id") \
+       .eq("job_key", job_key) \
+       .single() \
+       .execute()
+        last_processed = resume_row.data["last_message_id"] if resume_row.data else 0
+
+    try:
+        query = supabase.table("archive_messages") \
+      .select("*") \
+      .eq("source_group_id", source_group_id) \
+      .eq("target_group_id", target_group_id) \
+      .gt("message_id", last_processed) \
+      .order("message_id")
+
+        rows = await query.execute()
+    except Exception as e:
+        await msg.edit(f"Error reading archive_messages: {e}")
+        return
+
+    if not rows.data:
+        await msg.edit("✅ Nothing left to remap.")
+        return
+
+    topic_map = await get_topic_map(source_group_id, target_group_id) or {}
+    success = 0
+    failed = 0
+    created_topics = 0
+    total = len(rows.data)
+
+    await msg.edit(f"Starting from message {last_processed}. {total} messages left.")
+
+    for row in rows.data:
+        try:
+            source_topic_id = str(row["source_topic_id"])
+            source_topic_name = row["source_topic_name"]
+            target_topic_id = topic_map.get(source_topic_id)
+
+            if not target_topic_id:
+                try:
+                    new_topic = await client(CreateForumTopicRequest(
+                        peer=target_group_id,
+                        title=source_topic_name[:128],
+                        icon_color=0x6FB9F0
+                    ))
+                    target_topic_id = new_topic.updates[1].topic.id
+                    topic_map[source_topic_id] = target_topic_id
+                    await save_topic_map(source_group_id, target_group_id, topic_map)
+                    created_topics += 1
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"Create topic failed: {e}")
+                    continue
+
+            await client.forward_messages(
+                entity=target_group_id,
+                messages=row["message_id"],
+                from_peer=source_group_id,
+                reply_to=target_topic_id
+            )
+
+            success += 1
+            last_processed = row["message_id"]
+
+            if success % 10 == 0:
+                await supabase.table("remap_jobs").upsert({
+                    "job_key": job_key,
+                    "last_message_id": last_processed,
+                    "updated_at": "now()"
+                }).execute()
+                await msg.edit(f"Progress: {success}/{total} | Created topics: {created_topics}")
+
+            await asyncio.sleep(1.5)
+
+        except Exception as e:
+            failed += 1
+            logger.error(f"Forward failed: {e}")
+            continue
+
+    await supabase.table("remap_jobs").delete().eq("job_key", job_key).execute()
+    await msg.edit(f"✅ Done\n**Remapped**: {success}\n**Topics Created**: {created_topics}\n**Failed**: {failed}")
+
+@client.on(events.NewMessage(pattern=r'/unmaparchive (-?[0-9]+) (-?[0-9]+)'))
+async def unmap_archive(event):
+    """Delete topic mapping between source and target group."""
+    if not is_admin(event.sender_id):
+        return
+
+    source_group_id = int(event.pattern_match.group(1))
+    target_group_id = int(event.pattern_match.group(2))
+
+    await supabase.table("group_topic_map") \
+     .delete() \
+     .eq("source_id", source_group_id) \
+     .eq("target_id", target_group_id) \
+     .execute()
+
+    await event.reply(f"✅ Topic mapping removed for `{source_group_id}` → `{target_group_id}`")
+
+@client.on(events.NewMessage(pattern=r'/clearremapjob (-?[0-9]+) (-?[0-9]+)'))
+async def clear_remap_job(event):
+    """Delete resume checkpoint so remap starts from beginning."""
+    if not is_admin(event.sender_id):
+        return
+
+    source_group_id = int(event.pattern_match.group(1))
+    target_group_id = int(event.pattern_match.group(2))
+    job_key = f"{source_group_id}:{target_group_id}"
+
+    await supabase.table("remap_jobs") \
+     .delete() \
+     .eq("job_key", job_key) \
+     .execute()
+
+    await event.reply(f"✅ Checkpoint cleared for `{job_key}`")
+
+@client.on(events.NewMessage(pattern=r'/settopicmap (-?[0-9]+) (-?[0-9]+) (\d+) (\d+)'))
+async def set_topic_map_cmd(event):
+    """Manually map one source topic to
+
