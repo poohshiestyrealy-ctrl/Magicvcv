@@ -77,8 +77,6 @@ def is_gif(message):
 
 
 
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -192,6 +190,9 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
+
+
+
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
@@ -267,7 +268,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
         await status_msg.edit(f"Scrape failed: {e}")
 
 
-# ==================== FIXED resyncgroupfresh - Infinite Loop FIXED ====================
+# ==================== FIXED resyncgroupfresh (Loop + Archive Fixed) ====================
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -338,7 +339,6 @@ async def resync_group_fresh(event):
             retries += 1
             await asyncio.sleep(5)
 
-    # Strong deduplication and filtering
     src_topics = []
     seen = set()
     for t in all_topics:
@@ -357,7 +357,6 @@ async def resync_group_fresh(event):
         await msg.edit("❌ No valid topics found.")
         return
 
-    # Target side
     try:
         tgt_res = await asyncio.wait_for(
             client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100)),
@@ -372,7 +371,15 @@ async def resync_group_fresh(event):
     if not archive_topic:
         try:
             result = await client(CreateForumTopicRequest(channel=tgt_entity, title="Archive"))
-            archive_topic_id = result.updates[1].topic.id
+            archive_topic_id = None
+            for u in getattr(result, 'updates', []):
+                if hasattr(u, 'topic') and hasattr(u.topic, 'id'):
+                    archive_topic_id = u.topic.id
+                    break
+            if not archive_topic_id and hasattr(result, 'updates') and result.updates:
+                archive_topic_id = getattr(result.updates[-1], 'id', None)
+            if not archive_topic_id:
+                raise Exception("Could not get topic ID")
             await asyncio.sleep(2)
         except Exception as e:
             await msg.edit(f"Failed to create Archive: {e}")
@@ -399,8 +406,12 @@ async def resync_group_fresh(event):
                 title=t.title[:128],
                 icon_emoji_id=getattr(t, 'icon_emoji_id', None)
             ))
-            new_id = result.updates[1].topic.id
-            new_mapping[str(t.id)] = new_id
+            new_id = None
+            for u in getattr(result, 'updates', []):
+                if hasattr(u, 'topic') and hasattr(u.topic, 'id'):
+                    new_id = u.topic.id
+                    break
+            new_mapping[str(t.id)] = new_id or archive_topic_id
             created += 1
             await asyncio.sleep(3)
         except FloodWaitError as e:
@@ -410,22 +421,7 @@ async def resync_group_fresh(event):
             skipped += 1
 
     await save_topic_map(source_id, target_id, new_mapping)
-    await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-@client.on(events.NewMessage(pattern=r'/start'))
+    await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`")@client.on(events.NewMessage(pattern=r'/start'))
 async def start_cmd(event):
     if not is_admin(event.sender_id):
         return
@@ -436,41 +432,27 @@ async def start_cmd(event):
 async def help_handler(event):
     if not is_admin(event.sender_id):
         return
-    help_text = """
-**Yaga Bot Commands - Beginner Guide**
+    await event.reply("""**Yaga Bot Commands**
+/addsource <src> <dst>
+/removesource <src>
+/listmappings
+/resyncgroupfresh <src> <dst>
+/clearmapping <src> <dst>
+/debugtopics <gid>
+/diag <gid>
+/scrapegrouplike <src> [fresh]
+/addauto gif|short <src> <dst>
+/removeauto gif|short <src>
+/scrapegif <src>
+/scrapeshort <src>
+/stats
+/maparchive <src>
+/remaparchive <src> <dst>
+/unmaparchive <src> <dst>
+/clearremapjob <src> <dst>
+/settopicmap <src> <dst> <srctid> <dsttid>""")
 
-**1. Setup Topics:**
-`/addsource <src_id> <dst_id>` - Link source group to target group
-`/removesource <src_id>` - Remove the link
-`/listmappings` - Show all linked groups
-`/resyncgroupfresh <src_id> <dst_id>` - Create topics (fixed)
-`/clearmapping <src_id> <dst_id>` - Delete the topic mapping
-`/debugtopics <group_id> [group_id2]` - Check topics
-`/diag <group_id>` - Run diagnostics
-
-**2. Scrape Groups:**
-`/scrapegrouplike <src_id> [fresh]`
-
-**3. Auto GIF/Short:**
-`/addauto gif|short <src> <dst>`
-`/removeauto gif|short <src>`
-`/scrapegif <src_id>`
-`/scrapeshort <src_id>`
-
-**4. Archive Remap:**
-`/maparchive <source_id>`
-`/remaparchive <src_id> <dst_id>`
-`/unmaparchive <src_id> <dst_id>`
-`/clearremapjob <src_id> <dst_id>`
-`/settopicmap <src> <dst> <src_tid> <dst_tid>`
-
-**Other:**
-`/stats`
-"""
-    await event.reply(help_text)
-
-
-# ==================== ALL ORIGINAL COMMANDS ====================
+# ==================== ALL COMMANDS ====================
 
 @client.on(events.NewMessage(pattern=r'/listmappings'))
 async def list_mappings(event):
@@ -523,7 +505,7 @@ async def clear_mapping(event):
     msg = await event.reply(f"Clearing mapping for `{source_id}` -> `{target_id}`...")
     try:
         supabase.table("group_topic_map").delete().eq("source_id", source_id).eq("target_id", target_id).execute()
-        await msg.edit("**Mapping cleared**\nUse `/resyncgroupfresh {source_id} {target_id}` to rebuild.")
+        await msg.edit("**Mapping cleared**\nUse `/resyncgroupfresh` to rebuild.")
     except Exception as e:
         await msg.edit(f"Failed: {e}")
 
@@ -538,8 +520,7 @@ async def debug_topics(event):
     msg = await event.reply("Fetching topics...")
     try:
         entity1 = await asyncio.wait_for(client.get_entity(gid1), timeout=15)
-        res = await asyncio.wait_for(client(GetForumTopicsRequest(
-            channel=entity1, offset_date=0, offset_id=0, offset_topic=0, limit=200)), timeout=20)
+        res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity1, offset_date=0, offset_id=0, offset_topic=0, limit=200)), timeout=20)
         text = f"**Group {gid1}**\nTotal: {len(res.topics)}\n"
         for t in res.topics[:50]:
             text += f"ID:`{t.id}` Title:`{t.title}`\n"
@@ -550,6 +531,21 @@ async def debug_topics(event):
             for t in res2.topics[:50]:
                 text += f"ID:`{t.id}` Title:`{t.title}`\n"
         await msg.edit(text[:4000])
+    except Exception as e:
+        await msg.edit(f"Error: {e}")
+
+
+@client.on(events.NewMessage(pattern=r'/diag (-?[0-9]+)'))
+async def diag_group(event):
+    if not is_admin(event.sender_id):
+        return
+    gid = int(event.pattern_match.group(1))
+    msg = await event.reply(f"Running diagnostics on `{gid}`...")
+    try:
+        entity = await asyncio.wait_for(client.get_entity(gid), timeout=10)
+        await msg.edit(f"get_entity OK\nForum: {getattr(entity, 'forum', False)}")
+        res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity, limit=5)), timeout=15)
+        await msg.edit(f"get_entity OK\nGetForumTopics OK\nTopics: {len(res.topics)}")
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
@@ -566,6 +562,53 @@ async def scrape_group_like(event):
         return
     msg = await event.reply("Starting group scrape...")
     await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
+
+
+@client.on(events.NewMessage(pattern=r'/addauto (gif|short) (-?[0-9]+) (-?[0-9]+)'))
+async def add_auto(event):
+    if not is_admin(event.sender_id):
+        return
+    mode = event.pattern_match.group(1)
+    source_id = int(event.pattern_match.group(2))
+    target_id = int(event.pattern_match.group(3))
+    try:
+        supabase.table("auto_mappings").upsert({
+            "source_id": source_id,
+            "target_id": target_id,
+            "mode": mode
+        }, on_conflict="source_id,mode").execute()
+        if mode == "gif":
+            CONFIG["auto_gif"][str(source_id)] = str(target_id)
+        else:
+            CONFIG["auto_short"][str(source_id)] = str(target_id)
+        await event.reply(f"Added {mode} mapping: `{source_id}` -> `{target_id}`")
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
+
+
+@client.on(events.NewMessage(pattern=r'/removeauto (gif|short) (-?[0-9]+)'))
+async def remove_auto(event):
+    if not is_admin(event.sender_id):
+        return
+    mode = event.pattern_match.group(1)
+    source_id = int(event.pattern_match.group(2))
+    try:
+        supabase.table("auto_mappings").delete().eq("source_id", source_id).eq("mode", mode).execute()
+        if mode == "gif":
+            CONFIG["auto_gif"].pop(str(source_id), None)
+        else:
+            CONFIG["auto_short"].pop(str(source_id), None)
+        await event.reply(f"Removed {mode} mapping for `{source_id}`")
+    except Exception as e:
+        await event.reply(f"Failed: {e}")
+
+
+@client.on(events.NewMessage(pattern=r'/stats'))
+async def stats(event):
+    if not is_admin(event.sender_id):
+        return
+    text = f"**Stats**\nScraped: {scraped_count}\nSkipped: {skipped_count}\nMappings: {len(CONFIG['sources'])}\nGIF Auto: {len(CONFIG['auto_gif'])}\nShort Auto: {len(CONFIG['auto_short'])}"
+    await event.reply(text)
 
 
 # ==================== MAIN ====================
