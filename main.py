@@ -63,15 +63,6 @@ def is_gif(message):
         return any(getattr(a, 'round_message', False) or getattr(a, 'animated', False)
                    for a in getattr(message.document, 'attributes', []))
     return False
-
-
-
-
-
-
-
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -178,6 +169,8 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
+
+
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
@@ -191,7 +184,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
     source_topic_names = {}
     try:
         src_entity = await client.get_entity(source_id)
-        src_topics_res = await client(GetForumTopicsRequest(channel=src_entity, limit=200))
+        src_topics_res = await client(GetForumTopicsRequest(channel=src_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
         for t in src_topics_res.topics:
             source_topic_names[str(t.id)] = t.title
     except Exception as e:
@@ -461,7 +454,14 @@ async def resync_group_fresh(event):
     await save_topic_map(source_id, target_id, new_mapping)
     await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
 
-# ==================== NEW: syncmissing ====================
+
+
+
+
+
+
+
+# ==================== FIXED syncmissing ====================
 @client.on(events.NewMessage(pattern=r'/syncmissing (-?[0-9]+) (-?[0-9]+)'))
 async def sync_missing(event):
     if not is_admin(event.sender_id):
@@ -519,7 +519,13 @@ async def sync_missing(event):
 
     await msg.edit(f"📡 Fetching target topics...")
     try:
-        tgt_res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=tgt_entity, limit=200)), timeout=20)
+        tgt_res = await asyncio.wait_for(client(GetForumTopicsRequest(
+            channel=tgt_entity,
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=200
+        )), timeout=20)
         tgt_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
     except Exception as e:
         await msg.edit(f"❌ Failed to fetch target topics: {e}")
@@ -621,11 +627,6 @@ async def sync_missing(event):
 
     await save_topic_map(source_id, target_id, new_mapping)
     await msg.edit(f"**Sync Complete**\nSource topics: `{len(src_topics)}`\nMatched existing: `{matched}`\nCreated new: `{created}`\nMapped to Archive: `{to_archive}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
-
-
-
-
-
 
 
 
@@ -746,7 +747,7 @@ async def debug_topics(event):
             text += f"ID:`{t.id}` Title:`{t.title}`\n"
         if gid2:
             entity2 = await asyncio.wait_for(client.get_entity(gid2), timeout=15)
-            res2 = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity2, limit=200)), timeout=20)
+            res2 = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity2, offset_date=0, offset_id=0, offset_topic=0, limit=200)), timeout=20)
             text += f"\n**Group {gid2}**\nTotal: {len(res2.topics)}\n"
             for t in res2.topics[:50]:
                 text += f"ID:`{t.id}` Title:`{t.title}`\n"
@@ -763,7 +764,7 @@ async def diag_group(event):
     try:
         entity = await asyncio.wait_for(client.get_entity(gid), timeout=10)
         await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\nRunning...")
-        res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity, limit=5)), timeout=15)
+        res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity, offset_date=0, offset_id=0, offset_topic=0, limit=5)), timeout=15)
         await msg.edit(f"**Step 1/2**: get_entity\n✅ OK\n**Step 2/2**: get_topics\n✅ OK\nTopics found: `{len(res.topics)}`")
     except Exception as e:
         await msg.edit(f"Error: {e}")
