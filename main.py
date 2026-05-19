@@ -73,6 +73,7 @@ def is_gif(message):
 
 
 
+
 async def load_sources():
     global CONFIG
     try:
@@ -174,10 +175,6 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
-
-
-
-
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count, KILL_SWITCH
     topic_map = await get_topic_map(source_id, target_id)
@@ -201,7 +198,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
         await save_checkpoint(source_id, 0)
 
     count = checked = errors = 0
-    skipped_general = skipped_no_topic = skipped_no_video = skipped_no_map = skipped_too_large = 0
+    sent_to_general = skipped_no_video = skipped_too_large = skipped_no_map = 0
     current_delay = UPLOAD_DELAY
 
     try:
@@ -210,15 +207,14 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                 await status_msg.edit("**Scrape aborted by kill switch**")
                 await save_checkpoint(source_id, message.id)
                 return
-                
+
             checked += 1
             if checked % 500 == 0:
                 try:
                     await status_msg.edit(
                         f"Checked: {checked}\n"
                         f"Uploaded: {count}\n"
-                        f"Skip General: {skipped_general}\n"
-                        f"Skip NoTopic: {skipped_no_topic}\n"
+                        f"Sent to General: {sent_to_general}\n"
                         f"Skip NoVideo: {skipped_no_video}\n"
                         f"Skip >200MB: {skipped_too_large}\n"
                         f"Skip NoMap: {skipped_no_map}\n"
@@ -243,20 +239,20 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
             if src_topic_id:
                 if src_topic_id == 1:
-                    skipped_general += 1
-                    continue
-
-                reply_to = topic_map.get(str(src_topic_id))
-                if reply_to == archive_topic_id:
-                    original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
-                    caption = f"[ARCHIVED FROM: {original_name}]"
-                elif reply_to is None and archive_topic_id:
-                    reply_to = archive_topic_id
-                    original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
-                    caption = f"[ARCHIVED FROM: {original_name}]"
+                    reply_to = 1 # Source General → Target General
+                    sent_to_general += 1
+                else:
+                    reply_to = topic_map.get(str(src_topic_id))
+                    if reply_to == archive_topic_id:
+                        original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
+                        caption = f"[ARCHIVED FROM: {original_name}]"
+                    elif reply_to is None and archive_topic_id:
+                        reply_to = archive_topic_id
+                        original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
+                        caption = f"[ARCHIVED FROM: {original_name}]"
             else:
-                skipped_no_topic += 1
-                continue
+                reply_to = 1 # No topic → Target General
+                sent_to_general += 1
 
             if not reply_to:
                 skipped_no_map += 1
@@ -287,8 +283,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
             f"**Topic scrape done**\n"
             f"Checked: `{checked}`\n"
             f"Uploaded: `{count}`\n"
-            f"Skipped General: `{skipped_general}`\n"
-            f"Skipped No Topic: `{skipped_no_topic}`\n"
+            f"Sent to General: `{sent_to_general}`\n"
             f"Skipped No Video: `{skipped_no_video}`\n"
             f"Skipped >200MB: `{skipped_too_large}`\n"
             f"Skipped No Map: `{skipped_no_map}`\n"
@@ -524,15 +519,7 @@ async def resync_group_fresh(event):
                     await asyncio.sleep(5)
 
     await save_topic_map(source_id, target_id, new_mapping)
-    await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\nArchive ID: `{archive_topic_id}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
-
-
-
-
-
-
-
-@client.on(events.NewMessage(pattern=r'/syncmissing (-?[0-9]+) (-?[0-9]+)'))
+    await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\nArchive ID: `{archive_topic_id}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")@client.on(events.NewMessage(pattern=r'/syncmissing (-?[0-9]+) (-?[0-9]+)'))
 async def sync_missing(event):
     if not is_admin(event.sender_id):
         return
