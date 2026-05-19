@@ -64,6 +64,16 @@ def is_gif(message):
                    for a in getattr(message.document, 'attributes', []))
     return False
 
+
+
+
+
+
+
+
+
+
+
 async def load_sources():
     global CONFIG
     try:
@@ -166,6 +176,9 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
+
+
+
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
@@ -212,6 +225,10 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                 caption = ""
 
                 if src_topic_id:
+                    # Skip General/Main Room completely - keeps General empty
+                    if src_topic_id == 1:
+                        continue
+
                     reply_to = topic_map.get(str(src_topic_id))
                     # If mapped to Archive, add source topic name to caption
                     if reply_to == archive_topic_id:
@@ -222,9 +239,10 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                         original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
                         caption = f"[ARCHIVED FROM: {original_name}]"
                 else:
-                    reply_to = 1
+                    # No topic info = skip, don't send to General
+                    continue
 
-                if src_topic_id == 1:
+                if not reply_to:
                     continue
 
                 try:
@@ -256,7 +274,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
 
-# ==================== resyncgroupfresh ====================
+# ==================== resyncgroupfresh - Archive excluded from matching ====================
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -355,7 +373,16 @@ async def resync_group_fresh(event):
         await msg.edit(f"❌ Failed to fetch target topics: {e}")
         return
 
-    archive_topic = next((tt for tt in active_topics if getattr(tt, 'title', '') == "Archive"), None)
+    # Load existing Archive ID from DB first
+    archive_topic_id = await get_archive_topic_id(source_id, target_id)
+    archive_topic = None
+
+    if archive_topic_id:
+        archive_topic = next((tt for tt in active_topics if tt.id == archive_topic_id), None)
+
+    if not archive_topic:
+        archive_topic = next((tt for tt in active_topics if getattr(tt, 'title', '') == "Archive"), None)
+
     if not archive_topic:
         try:
             await msg.edit("Creating Archive topic...")
@@ -392,6 +419,9 @@ async def resync_group_fresh(event):
 
     await save_archive_topic_id(source_id, target_id, archive_topic_id)
 
+    # Build name map excluding Archive and General
+    target_name_map = {tt.title: tt.id for tt in active_topics if tt.id!= archive_topic_id}
+
     new_mapping = {}
     created = 0
     skipped = 0
@@ -404,6 +434,11 @@ async def resync_group_fresh(event):
             continue
 
         title = (t.title or f"Topic {t.id}")[:128]
+
+        if title in target_name_map:
+            new_mapping[str(t.id)] = target_name_map[title]
+            skipped += 1
+            continue
 
         for attempt in range(3):
             try:
@@ -448,7 +483,7 @@ async def resync_group_fresh(event):
                     await asyncio.sleep(5)
 
     await save_topic_map(source_id, target_id, new_mapping)
-    await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
+    await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\nArchive ID: `{archive_topic_id}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
 
 
 
@@ -456,7 +491,8 @@ async def resync_group_fresh(event):
 
 
 
-# ==================== FIXED syncmissing - Preserves Archive ====================
+
+# ==================== syncmissing - Preserves Archive ====================
 @client.on(events.NewMessage(pattern=r'/syncmissing (-?[0-9]+) (-?[0-9]+)'))
 async def sync_missing(event):
     if not is_admin(event.sender_id):
@@ -479,7 +515,7 @@ async def sync_missing(event):
 
     existing_mapping = await get_topic_map(source_id, target_id)
     archive_topic_id = await get_archive_topic_id(source_id, target_id)
-    
+
     if not existing_mapping:
         await msg.edit("❌ No existing mapping found. Run `/resyncgroupfresh` first to create the initial map.")
         return
@@ -538,7 +574,7 @@ async def sync_missing(event):
         return
 
     valid_target_ids = {tt.id for tt in tgt_topics}
-    
+
     new_mapping = {}
     preserved = 0
     remapped_from_archive = 0
@@ -547,24 +583,24 @@ async def sync_missing(event):
 
     for src_t in src_topics:
         src_id_str = str(src_t.id)
-        
+
         if src_id_str in existing_mapping:
             old_target_id = existing_mapping[src_id_str]
-            
+
             if old_target_id == archive_topic_id:
                 new_mapping[src_id_str] = archive_topic_id
                 still_archive += 1
                 continue
-            
+
             if old_target_id in valid_target_ids:
                 new_mapping[src_id_str] = old_target_id
                 preserved += 1
                 continue
-            
+
             invalid_remapped += 1
-        
+
         matching_topic = next((tt for tt in tgt_topics if tt.title == src_t.title[:128] and tt.id!= archive_topic_id), None)
-        
+
         if matching_topic:
             new_mapping[src_id_str] = matching_topic.id
             remapped_from_archive += 1
@@ -573,7 +609,7 @@ async def sync_missing(event):
             still_archive += 1
 
     await save_topic_map(source_id, target_id, new_mapping)
-    
+
     await msg.edit(f"**Sync Complete**\n"
                    f"Source topics: `{len(src_topics)}`\n"
                    f"Preserved existing mappings: `{preserved}`\n"
@@ -659,14 +695,6 @@ async def remove_source(event):
     except Exception as e:
         await event.reply(f"Error: {e}")
 
-
-
-
-
-
-
-
-
 @client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
 async def clear_mapping(event):
     if not is_admin(event.sender_id):
@@ -724,7 +752,7 @@ async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
     source_id = int(event.pattern_match.group(1))
-    force_fresh = event.pattern_match.group(2) == 'fresh' # Fixed: now captures 'fresh'
+    force_fresh = event.pattern_match.group(2) == 'fresh'
     target_id = CONFIG["sources"].get(str(source_id))
     if not target_id:
         await event.reply(f"No mapping for `{source_id}`. Use `/addsource` first")
