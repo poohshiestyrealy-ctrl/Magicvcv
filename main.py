@@ -20,9 +20,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 BOT_LOG_CHAT_ID = int(os.getenv("BOT_LOG_CHAT_ID", "0"))
 
-MAX_FILE_SIZE = 200 * 1024 * 1024
+MAX_FILE_SIZE = 200 * 1024
 UPLOAD_DELAY = 30
-TOPIC_CREATE_DELAY = 60  # Telegram requires 60s between topic creates
+TOPIC_CREATE_DELAY = 60 # Telegram requires 60s between topic creates
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -36,7 +36,7 @@ def rebuild_mapped_chats():
     mapped_chats = set(CONFIG["sources"].keys()) | set(CONFIG["auto_gif"].keys()) | set(CONFIG["auto_short"].keys())
 
 async def send_log(text):
-    if BOT_LOG_CHAT_ID != 0:
+    if BOT_LOG_CHAT_ID!= 0:
         try:
             await client.send_message(BOT_LOG_CHAT_ID, f"**Bot Log**\n{text}")
         except Exception as e:
@@ -63,9 +63,6 @@ def is_gif(message):
         return any(getattr(a, 'round_message', False) or getattr(a, 'animated', False)
                    for a in getattr(message.document, 'attributes', []))
     return False
-
-
-
 
 
 
@@ -181,16 +178,24 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
-
-
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
     archive_topic_id = await get_archive_topic_id(source_id, target_id)
 
     if not topic_map:
-        await status_msg.edit("No topic map found. Run `/resyncgroupfresh source_id target_id` first")
+        await status_msg.edit("No topic map found. Run `/resyncgroupfresh source_id target_id` or `/syncmissing source_id target_id` first")
         return
+
+    # Build reverse lookup: topic_id -> topic_name from source
+    source_topic_names = {}
+    try:
+        src_entity = await client.get_entity(source_id)
+        src_topics_res = await client(GetForumTopicsRequest(channel=src_entity, limit=200))
+        for t in src_topics_res.topics:
+            source_topic_names[str(t.id)] = t.title
+    except Exception as e:
+        logger.error(f"Failed to fetch source topic names: {e}")
 
     offset_id = 0 if force_fresh else await get_checkpoint(f"group_{source_id}")
     if force_fresh:
@@ -217,11 +222,14 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                 video_attr = get_video_attr(message)
                 reply_to = None
                 src_topic_id = getattr(message, 'reply_to_topic_id', None)
+                caption = ""
 
                 if src_topic_id:
                     reply_to = topic_map.get(str(src_topic_id))
                     if reply_to is None and archive_topic_id:
                         reply_to = archive_topic_id
+                        original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
+                        caption = f"[ARCHIVED FROM: {original_name}]"
                 else:
                     reply_to = 1
 
@@ -232,7 +240,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                     await client.send_file(
                         target_id,
                         message.media,
-                        caption="",
+                        caption=caption,
                         attributes=[video_attr] if video_attr else None,
                         force_document=False,
                         reply_to=reply_to
@@ -251,7 +259,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
         await save_checkpoint(f"group_{source_id}", 0)
         final = f"**Topic scrape done**\nChecked: `{checked}`\nUploaded: `{count}`\nSkipped >{MAX_FILE_SIZE//1024//1024}MB: `{skipped_count}`\nErrors: `{errors}`"
         if archive_topic_id:
-            final += f"\nOverflow sent to Archive topic"
+            final += f"\nOverflow sent to Archive topic with source names preserved"
         await status_msg.edit(final)
 
     except Exception as e:
@@ -453,6 +461,169 @@ async def resync_group_fresh(event):
     await save_topic_map(source_id, target_id, new_mapping)
     await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
 
+# ==================== NEW: syncmissing ====================
+@client.on(events.NewMessage(pattern=r'/syncmissing (-?[0-9]+) (-?[0-9]+)'))
+async def sync_missing(event):
+    if not is_admin(event.sender_id):
+        return
+
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+    msg = await event.reply("🔍 Comparing topics...")
+
+    try:
+        src_entity = await asyncio.wait_for(client.get_entity(source_id), timeout=15)
+        tgt_entity = await asyncio.wait_for(client.get_entity(target_id), timeout=15)
+    except Exception as e:
+        await msg.edit(f"❌ Error: {e}")
+        return
+
+    if not getattr(src_entity, 'forum', False) or not getattr(tgt_entity, 'forum', False):
+        await msg.edit("❌ Both groups need topics enabled")
+        return
+
+    await msg.edit("📡 Fetching source topics...")
+    all_topics = []
+    offset_date = 0
+    offset_id = 0
+    offset_topic = 0
+    retries = 0
+
+    while retries < 8:
+        try:
+            res = await asyncio.wait_for(
+                client(GetForumTopicsRequest(channel=src_entity, offset_date=offset_date, offset_id=offset_id, offset_topic=offset_topic, limit=100)),
+                timeout=30
+            )
+            if not res.topics:
+                break
+            all_topics.extend(res.topics)
+            if len(res.topics) < 100:
+                break
+            last = res.topics[-1]
+            offset_date = getattr(last, 'date', 0)
+            offset_id = getattr(last, 'top_message', 0)
+            offset_topic = last.id
+            await asyncio.sleep(2)
+        except:
+            retries += 1
+            await asyncio.sleep(5)
+
+    src_topics = []
+    seen = set()
+    for t in all_topics:
+        if t.id in seen or t.id == 1 or getattr(t, 'deleted', False) or not getattr(t, 'title', '').strip():
+            continue
+        seen.add(t.id)
+        src_topics.append(t)
+
+    await msg.edit(f"📡 Fetching target topics...")
+    try:
+        tgt_res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=tgt_entity, limit=200)), timeout=20)
+        tgt_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
+    except Exception as e:
+        await msg.edit(f"❌ Failed to fetch target topics: {e}")
+        return
+
+    # Get or create Archive
+    archive_topic = next((tt for tt in tgt_topics if getattr(tt, 'title', '') == "Archive"), None)
+    if not archive_topic:
+        try:
+            await msg.edit("Creating Archive topic...")
+            result = await client(CreateForumTopicRequest(channel=tgt_entity, title="Archive"))
+            archive_topic_id = None
+            if hasattr(result, 'updates'):
+                for update in result.updates:
+                    if hasattr(update, 'message'):
+                        archive_topic_id = update.message.id
+                        break
+                    elif hasattr(update, 'topic'):
+                        archive_topic_id = update.topic.id
+                        break
+            if not archive_topic_id:
+                raise Exception("No Archive ID")
+            await asyncio.sleep(TOPIC_CREATE_DELAY)
+        except Exception as e:
+            await msg.edit(f"❌ Failed to create Archive: {e}")
+            return
+    else:
+        archive_topic_id = archive_topic.id
+
+    await save_archive_topic_id(source_id, target_id, archive_topic_id)
+
+    # Load existing mapping
+    existing_mapping = await get_topic_map(source_id, target_id)
+
+    # Build target title -> id lookup
+    tgt_title_map = {tt.title: tt.id for tt in tgt_topics}
+
+    new_mapping = dict(existing_mapping)
+    matched = 0
+    created = 0
+    to_archive = 0
+
+    available_slots = 100 - len(tgt_topics)
+
+    for idx, src_t in enumerate(src_topics):
+        src_title = src_t.title[:128]
+
+        # Check if already mapped
+        if str(src_t.id) in new_mapping:
+            matched += 1
+            continue
+
+        # Check if target already has topic with same name
+        if src_title in tgt_title_map:
+            new_mapping[str(src_t.id)] = tgt_title_map[src_title]
+            matched += 1
+            continue
+
+        # Need to create
+        if created < available_slots:
+            for attempt in range(3):
+                try:
+                    await msg.edit(f"Creating {idx+1}/{len(src_topics)}: {src_title}\nMatched: {matched} | Created: {created} | Archive: {to_archive}")
+                    result = await client(CreateForumTopicRequest(
+                        channel=tgt_entity,
+                        title=src_title,
+                        icon_emoji_id=getattr(src_t, 'icon_emoji_id', None)
+                    ))
+                    new_id = None
+                    if hasattr(result, 'updates'):
+                        for update in result.updates:
+                            if hasattr(update, 'message'):
+                                new_id = update.message.id
+                                break
+                            elif hasattr(update, 'topic'):
+                                new_id = update.topic.id
+                                break
+                    if new_id:
+                        new_mapping[str(src_t.id)] = new_id
+                        tgt_title_map[src_title] = new_id
+                        created += 1
+                        await asyncio.sleep(TOPIC_CREATE_DELAY)
+                        break
+                except FloodWaitError as e:
+                    if attempt == 2:
+                        new_mapping[str(src_t.id)] = archive_topic_id
+                        to_archive += 1
+                    else:
+                        await asyncio.sleep(e.seconds + 10)
+                except:
+                    if attempt == 2:
+                        new_mapping[str(src_t.id)] = archive_topic_id
+                        to_archive += 1
+                    else:
+                        await asyncio.sleep(5)
+        else:
+            new_mapping[str(src_t.id)] = archive_topic_id
+            to_archive += 1
+
+    await save_topic_map(source_id, target_id, new_mapping)
+    await msg.edit(f"**Sync Complete**\nSource topics: `{len(src_topics)}`\nMatched existing: `{matched}`\nCreated new: `{created}`\nMapped to Archive: `{to_archive}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
+
+
+
 
 
 
@@ -481,6 +652,7 @@ async def help_handler(event):
 `/removesource <src_id>` - Remove the link
 `/listmappings` - Show all linked groups
 `/resyncgroupfresh <src_id> <dst_id>` - Create 1 topic in target for every topic in source
+`/syncmissing <src_id> <dst_id>` - Compare and create only missing topics
 `/clearmapping <src_id> <dst_id>` - Delete the topic mapping
 `/debugtopics <group_id> [group_id2]` - Check if bot can see topics
 `/diag <group_id>` - Run diagnostics to check why topics aren't loading
