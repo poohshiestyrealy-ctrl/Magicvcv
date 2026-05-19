@@ -30,6 +30,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 CONFIG = {"sources": {}, "auto_gif": {}, "auto_short": {}}
 scraped_count = 0
 skipped_count = 0
+KILL_SWITCH = False # Kill switch for runaway scrapers
 
 def rebuild_mapped_chats():
     global mapped_chats
@@ -63,7 +64,6 @@ def is_gif(message):
         return any(getattr(a, 'round_message', False) or getattr(a, 'animated', False)
                    for a in getattr(message.document, 'attributes', []))
     return False
-
 
 
 
@@ -179,8 +179,10 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
+
+
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
-    global scraped_count, skipped_count
+    global scraped_count, skipped_count, KILL_SWITCH
     topic_map = await get_topic_map(source_id, target_id)
     archive_topic_id = await get_archive_topic_id(source_id, target_id)
 
@@ -197,22 +199,27 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
     except Exception as e:
         logger.error(f"Failed to fetch source topic names: {e}")
 
-    offset_id = 0 if force_fresh else await get_checkpoint(f"group_{source_id}")
+    offset_id = 0 if force_fresh else await get_checkpoint(source_id)
     if force_fresh:
-        await save_checkpoint(f"group_{source_id}", 0)
+        await save_checkpoint(source_id, 0)
 
     count = checked = errors = 0
     current_delay = UPLOAD_DELAY
 
     try:
         async for message in client.iter_messages(source_id, limit=None, offset_id=offset_id, reverse=True):
+            if KILL_SWITCH:
+                await status_msg.edit("**Scrape aborted by kill switch**")
+                await save_checkpoint(source_id, message.id)
+                return
+                
             checked += 1
             if checked % 500 == 0:
                 try:
                     await status_msg.edit(f"Checked {checked}... Uploaded {count}... Errors {errors}")
                 except:
                     pass
-                await save_checkpoint(f"group_{source_id}", message.id)
+                await save_checkpoint(source_id, message.id)
 
             if message.file and message.file.size > MAX_FILE_SIZE:
                 skipped_count += 1
@@ -225,12 +232,10 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                 caption = ""
 
                 if src_topic_id:
-                    # Skip General/Main Room completely - keeps General empty
                     if src_topic_id == 1:
                         continue
 
                     reply_to = topic_map.get(str(src_topic_id))
-                    # If mapped to Archive, add source topic name to caption
                     if reply_to == archive_topic_id:
                         original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
                         caption = f"[ARCHIVED FROM: {original_name}]"
@@ -239,7 +244,6 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                         original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
                         caption = f"[ARCHIVED FROM: {original_name}]"
                 else:
-                    # No topic info = skip, don't send to General
                     continue
 
                 if not reply_to:
@@ -256,7 +260,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                     )
                     count += 1
                     scraped_count += 1
-                    await save_checkpoint(f"group_{source_id}", message.id)
+                    await save_checkpoint(source_id, message.id)
                     await asyncio.sleep(current_delay)
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds)
@@ -265,7 +269,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                     errors += 1
                     logger.error(f"Send failed: {e}")
 
-        await save_checkpoint(f"group_{source_id}", 0)
+        await save_checkpoint(source_id, 0)
         final = f"**Topic scrape done**\nChecked: `{checked}`\nUploaded: `{count}`\nSkipped >{MAX_FILE_SIZE//1024//1024}MB: `{skipped_count}`\nErrors: `{errors}`"
         if archive_topic_id:
             final += f"\nOverflow sent to Archive topic with source names preserved"
@@ -274,7 +278,23 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
     except Exception as e:
         await status_msg.edit(f"Scrape failed: {e}")
 
-# ==================== resyncgroupfresh - Archive excluded from matching ====================
+@client.on(events.NewMessage(pattern=r'/killall'))
+async def kill_all(event):
+    global KILL_SWITCH
+    if not is_admin(event.sender_id):
+        return
+    KILL_SWITCH = True
+    await event.reply("**KILL SWITCH ACTIVATED**\nStopping all running scrapers...")
+    await send_log(f"KILL SWITCH triggered by {event.sender_id}")
+
+@client.on(events.NewMessage(pattern=r'/resetkill'))
+async def reset_kill(event):
+    global KILL_SWITCH
+    if not is_admin(event.sender_id):
+        return
+    KILL_SWITCH = False
+    await event.reply("Kill switch reset. Scrapers can run again.")
+
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -373,7 +393,6 @@ async def resync_group_fresh(event):
         await msg.edit(f"❌ Failed to fetch target topics: {e}")
         return
 
-    # Load existing Archive ID from DB first
     archive_topic_id = await get_archive_topic_id(source_id, target_id)
     archive_topic = None
 
@@ -419,7 +438,6 @@ async def resync_group_fresh(event):
 
     await save_archive_topic_id(source_id, target_id, archive_topic_id)
 
-    # Build name map excluding Archive and General
     target_name_map = {tt.title: tt.id for tt in active_topics if tt.id!= archive_topic_id}
 
     new_mapping = {}
@@ -492,7 +510,7 @@ async def resync_group_fresh(event):
 
 
 
-# ==================== syncmissing - Preserves Archive ====================
+
 @client.on(events.NewMessage(pattern=r'/syncmissing (-?[0-9]+) (-?[0-9]+)'))
 async def sync_missing(event):
     if not is_admin(event.sender_id):
@@ -644,6 +662,8 @@ async def help_handler(event):
 
 **2. Scrape Groups:**
 `/scrapegrouplike <src_id> [fresh]` - Start scraping. Add 'fresh' to start from beginning
+`/killall` - EMERGENCY: Stop all running scrapers immediately
+`/resetkill` - Re-enable scrapers after kill switch
 
 **3. Auto GIF/Short:**
 `/addauto gif|short <src> <dst>` - Auto forward GIFs or shorts
@@ -746,10 +766,13 @@ async def diag_group(event):
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
-# ==================== FIXED scrapegrouplike - No IndexError ====================
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+(fresh))?'))
 async def scrape_group_like(event):
+    global KILL_SWITCH
     if not is_admin(event.sender_id):
+        return
+    if KILL_SWITCH:
+        await event.reply("Kill switch is active. Run `/resetkill` first.")
         return
     source_id = int(event.pattern_match.group(1))
     force_fresh = event.pattern_match.group(2) == 'fresh'
