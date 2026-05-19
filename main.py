@@ -761,7 +761,14 @@ async def remap_archive(event):
 
             if not target_topic_id:
                 new_topic = await client(CreateForumTopicRequest(peer=target_group_id, title=source_topic_name[:128]))
-                target_topic_id = new_topic.updates[1].topic.id
+                target_topic_id = None
+                for upd in new_topic.updates:
+                    if hasattr(upd, 'topic') and upd.topic:
+                        target_topic_id = upd.topic.id
+                        break
+                if not target_topic_id:
+                    failed += 1
+                    continue
                 topic_map[source_topic_id] = target_topic_id
                 await save_topic_map(source_group_id, target_group_id, topic_map)
                 created_topics += 1
@@ -846,9 +853,17 @@ async def build_mapping(event):
         ))
         active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
         archive_topic = next((tt for tt in active_topics if tt.title == "Archive"), None)
+        
         if not archive_topic:
             result = await client(CreateForumTopicRequest(channel=dst_entity, title="Archive"))
-            archive_topic_id = result.updates[1].topic.id
+            archive_topic_id = None
+            for upd in result.updates:
+                if hasattr(upd, 'topic') and upd.topic:
+                    archive_topic_id = upd.topic.id
+                    break
+            if not archive_topic_id:
+                await msg.edit("❌ Could not get Archive topic ID from response")
+                return
         else:
             archive_topic_id = archive_topic.id
     except Exception as e:
@@ -875,7 +890,16 @@ async def build_mapping(event):
                 title=t.title[:128],
                 icon_emoji_id=getattr(t, 'icon_emoji_id', None)
             ))
-            new_id = result.updates[1].topic.id
+            new_id = None
+            for upd in result.updates:
+                if hasattr(upd, 'topic') and upd.topic:
+                    new_id = upd.topic.id
+                    break
+            if not new_id:
+                new_mapping[str(t.id)] = archive_topic_id
+                skipped += 1
+                continue
+                
             new_mapping[str(t.id)] = new_id
             created += 1
             await asyncio.sleep(2)
