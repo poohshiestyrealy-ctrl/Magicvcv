@@ -79,8 +79,6 @@ def is_gif(message):
 
 
 
-
-
 async def load_sources():
     global CONFIG
     try:
@@ -194,13 +192,6 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
-
-
-
-
-
-
-
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
@@ -276,7 +267,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
         await status_msg.edit(f"Scrape failed: {e}")
 
 
-# ==================== FIXED resyncgroupfresh ====================
+# ==================== FIXED resyncgroupfresh - Infinite Loop FIXED ====================
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
     if not is_admin(event.sender_id):
@@ -300,17 +291,18 @@ async def resync_group_fresh(event):
     await msg.edit("📡 Fetching source topics...")
 
     all_topics = []
-    offset_topic = 0
+    offset_date = 0
     offset_id = 0
+    offset_topic = 0
     retries = 0
-    max_retries = 6
+    max_retries = 8
 
     while retries < max_retries:
         try:
             res = await asyncio.wait_for(
                 client(GetForumTopicsRequest(
                     channel=src_entity,
-                    offset_date=0,
+                    offset_date=offset_date,
                     offset_id=offset_id,
                     offset_topic=offset_topic,
                     limit=100,
@@ -318,7 +310,7 @@ async def resync_group_fresh(event):
                 timeout=30
             )
 
-            if not res.topics:
+            if not res.topics or len(res.topics) == 0:
                 break
 
             all_topics.extend(res.topics)
@@ -328,14 +320,15 @@ async def resync_group_fresh(event):
                 break
 
             last = res.topics[-1]
-            offset_topic = last.id
+            offset_date = getattr(last, 'date', 0)
             offset_id = getattr(last, 'top_message', 0)
+            offset_topic = last.id
 
             await asyncio.sleep(2)
 
         except asyncio.TimeoutError:
             retries += 1
-            await asyncio.sleep(6)
+            await asyncio.sleep(8)
             continue
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds + 5)
@@ -345,7 +338,7 @@ async def resync_group_fresh(event):
             retries += 1
             await asyncio.sleep(5)
 
-    # Strong filtering
+    # Strong deduplication and filtering
     src_topics = []
     seen = set()
     for t in all_topics:
@@ -364,6 +357,7 @@ async def resync_group_fresh(event):
         await msg.edit("❌ No valid topics found.")
         return
 
+    # Target side
     try:
         tgt_res = await asyncio.wait_for(
             client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100)),
@@ -430,6 +424,7 @@ async def resync_group_fresh(event):
 
 
 
+
 @client.on(events.NewMessage(pattern=r'/start'))
 async def start_cmd(event):
     if not is_admin(event.sender_id):
@@ -470,12 +465,13 @@ async def help_handler(event):
 `/settopicmap <src> <dst> <src_tid> <dst_tid>`
 
 **Other:**
-`/stats` - Show stats
+`/stats`
 """
     await event.reply(help_text)
 
 
-# === All Original Commands ===
+# ==================== ALL ORIGINAL COMMANDS ====================
+
 @client.on(events.NewMessage(pattern=r'/listmappings'))
 async def list_mappings(event):
     if not is_admin(event.sender_id):
@@ -527,7 +523,7 @@ async def clear_mapping(event):
     msg = await event.reply(f"Clearing mapping for `{source_id}` -> `{target_id}`...")
     try:
         supabase.table("group_topic_map").delete().eq("source_id", source_id).eq("target_id", target_id).execute()
-        await msg.edit("**Mapping cleared**\nUse `/resyncgroupfresh` to rebuild.")
+        await msg.edit("**Mapping cleared**\nUse `/resyncgroupfresh {source_id} {target_id}` to rebuild.")
     except Exception as e:
         await msg.edit(f"Failed: {e}")
 
@@ -542,23 +538,20 @@ async def debug_topics(event):
     msg = await event.reply("Fetching topics...")
     try:
         entity1 = await asyncio.wait_for(client.get_entity(gid1), timeout=15)
-        res = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity1, offset_date=0, offset_id=0, offset_topic=0, limit=200)), timeout=20)
+        res = await asyncio.wait_for(client(GetForumTopicsRequest(
+            channel=entity1, offset_date=0, offset_id=0, offset_topic=0, limit=200)), timeout=20)
         text = f"**Group {gid1}**\nTotal: {len(res.topics)}\n"
-        for t in res.topics[:30]:
+        for t in res.topics[:50]:
             text += f"ID:`{t.id}` Title:`{t.title}`\n"
+        if gid2:
+            entity2 = await asyncio.wait_for(client.get_entity(gid2), timeout=15)
+            res2 = await asyncio.wait_for(client(GetForumTopicsRequest(channel=entity2, limit=200)), timeout=20)
+            text += f"\n**Group {gid2}**\nTotal: {len(res2.topics)}\n"
+            for t in res2.topics[:50]:
+                text += f"ID:`{t.id}` Title:`{t.title}`\n"
         await msg.edit(text[:4000])
     except Exception as e:
         await msg.edit(f"Error: {e}")
-
-
-@client.on(events.NewMessage(pattern=r'/diag (-?[0-9]+)'))
-async def diag_group(event):
-    if not is_admin(event.sender_id):
-        return
-    gid = int(event.pattern_match.group(1))
-    msg = await event.reply(f"Running diagnostics on `{gid}`...")
-    # (Add your original diag logic if needed)
-    await msg.edit("Diagnostics ran. Check logs.")
 
 
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+fresh)?'))
@@ -574,8 +567,6 @@ async def scrape_group_like(event):
     msg = await event.reply("Starting group scrape...")
     await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
 
-
-# Add your remaining commands (addauto, removeauto, scrapegif, scrapeshort, stats, maparchive, remaparchive, etc.) here from your original file if they are missing.
 
 # ==================== MAIN ====================
 async def main():
