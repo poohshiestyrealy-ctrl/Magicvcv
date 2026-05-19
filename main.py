@@ -166,14 +166,6 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
-
-
-
-
-
-
-
-
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count
     topic_map = await get_topic_map(source_id, target_id)
@@ -221,7 +213,11 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
                 if src_topic_id:
                     reply_to = topic_map.get(str(src_topic_id))
-                    if reply_to is None and archive_topic_id:
+                    # If mapped to Archive, add source topic name to caption
+                    if reply_to == archive_topic_id:
+                        original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
+                        caption = f"[ARCHIVED FROM: {original_name}]"
+                    elif reply_to is None and archive_topic_id:
                         reply_to = archive_topic_id
                         original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
                         caption = f"[ARCHIVED FROM: {original_name}]"
@@ -460,11 +456,6 @@ async def resync_group_fresh(event):
 
 
 
-
-
-
-
-
 # ==================== FIXED syncmissing - Preserves Archive ====================
 @client.on(events.NewMessage(pattern=r'/syncmissing (-?[0-9]+) (-?[0-9]+)'))
 async def sync_missing(event):
@@ -486,7 +477,6 @@ async def sync_missing(event):
         await msg.edit("❌ Both groups need topics enabled")
         return
 
-    # Load existing mapping FIRST - critical for preserving Archive
     existing_mapping = await get_topic_map(source_id, target_id)
     archive_topic_id = await get_archive_topic_id(source_id, target_id)
     
@@ -561,23 +551,19 @@ async def sync_missing(event):
         if src_id_str in existing_mapping:
             old_target_id = existing_mapping[src_id_str]
             
-            # Case 1: Already mapped to Archive - KEEP IT THERE
             if old_target_id == archive_topic_id:
                 new_mapping[src_id_str] = archive_topic_id
                 still_archive += 1
                 continue
             
-            # Case 2: Mapped to real topic that still exists - keep it
             if old_target_id in valid_target_ids:
                 new_mapping[src_id_str] = old_target_id
                 preserved += 1
                 continue
             
-            # Case 3: Mapped to topic ID that doesn't exist anymore - needs remap
             invalid_remapped += 1
         
-        # For new topics or invalid old mappings: check if real topic exists now
-        matching_topic = next((tt for tt in tgt_topics if tt.title == src_t.title[:128] and tt.id != archive_topic_id), None)
+        matching_topic = next((tt for tt in tgt_topics if tt.title == src_t.title[:128] and tt.id!= archive_topic_id), None)
         
         if matching_topic:
             new_mapping[src_id_str] = matching_topic.id
@@ -681,12 +667,6 @@ async def remove_source(event):
 
 
 
-
-
-
-
-
-
 @client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
 async def clear_mapping(event):
     if not is_admin(event.sender_id):
@@ -738,12 +718,13 @@ async def diag_group(event):
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
-@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+fresh)?'))
+# ==================== FIXED scrapegrouplike - No IndexError ====================
+@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+(fresh))?'))
 async def scrape_group_like(event):
     if not is_admin(event.sender_id):
         return
     source_id = int(event.pattern_match.group(1))
-    force_fresh = event.pattern_match.group(2) is not None
+    force_fresh = event.pattern_match.group(2) == 'fresh' # Fixed: now captures 'fresh'
     target_id = CONFIG["sources"].get(str(source_id))
     if not target_id:
         await event.reply(f"No mapping for `{source_id}`. Use `/addsource` first")
