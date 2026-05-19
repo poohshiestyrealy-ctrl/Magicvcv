@@ -30,7 +30,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 CONFIG = {"sources": {}, "auto_gif": {}, "auto_short": {}}
 scraped_count = 0
 skipped_count = 0
-KILL_SWITCH = False # Kill switch for runaway scrapers
+KILL_SWITCH = False
 
 def rebuild_mapped_chats():
     global mapped_chats
@@ -64,7 +64,6 @@ def is_gif(message):
         return any(getattr(a, 'round_message', False) or getattr(a, 'animated', False)
                    for a in getattr(message.document, 'attributes', []))
     return False
-
 
 
 
@@ -179,15 +178,13 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
-
-
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count, KILL_SWITCH
     topic_map = await get_topic_map(source_id, target_id)
     archive_topic_id = await get_archive_topic_id(source_id, target_id)
 
     if not topic_map:
-        await status_msg.edit("No topic map found. Run `/resyncgroupfresh source_id target_id` or `/syncmissing source_id target_id` first")
+        await status_msg.edit("No topic map found. Run `/resyncgroupfresh source_id target_id` first")
         return
 
     source_topic_names = {}
@@ -204,6 +201,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
         await save_checkpoint(source_id, 0)
 
     count = checked = errors = 0
+    skipped_general = skipped_no_topic = skipped_no_video = skipped_no_map = skipped_too_large = 0
     current_delay = UPLOAD_DELAY
 
     try:
@@ -216,63 +214,88 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
             checked += 1
             if checked % 500 == 0:
                 try:
-                    await status_msg.edit(f"Checked {checked}... Uploaded {count}... Errors {errors}")
+                    await status_msg.edit(
+                        f"Checked: {checked}\n"
+                        f"Uploaded: {count}\n"
+                        f"Skip General: {skipped_general}\n"
+                        f"Skip NoTopic: {skipped_no_topic}\n"
+                        f"Skip NoVideo: {skipped_no_video}\n"
+                        f"Skip >200MB: {skipped_too_large}\n"
+                        f"Skip NoMap: {skipped_no_map}\n"
+                        f"Errors: {errors}"
+                    )
                 except:
                     pass
                 await save_checkpoint(source_id, message.id)
 
             if message.file and message.file.size > MAX_FILE_SIZE:
-                skipped_count += 1
+                skipped_too_large += 1
                 continue
 
-            if is_video_message(message):
-                video_attr = get_video_attr(message)
-                reply_to = None
-                src_topic_id = getattr(message, 'reply_to_topic_id', None)
-                caption = ""
+            if not is_video_message(message):
+                skipped_no_video += 1
+                continue
 
-                if src_topic_id:
-                    if src_topic_id == 1:
-                        continue
+            video_attr = get_video_attr(message)
+            reply_to = None
+            src_topic_id = getattr(message, 'reply_to_topic_id', None)
+            caption = ""
 
-                    reply_to = topic_map.get(str(src_topic_id))
-                    if reply_to == archive_topic_id:
-                        original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
-                        caption = f"[ARCHIVED FROM: {original_name}]"
-                    elif reply_to is None and archive_topic_id:
-                        reply_to = archive_topic_id
-                        original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
-                        caption = f"[ARCHIVED FROM: {original_name}]"
-                else:
+            if src_topic_id:
+                if src_topic_id == 1:
+                    skipped_general += 1
                     continue
 
-                if not reply_to:
-                    continue
+                reply_to = topic_map.get(str(src_topic_id))
+                if reply_to == archive_topic_id:
+                    original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
+                    caption = f"[ARCHIVED FROM: {original_name}]"
+                elif reply_to is None and archive_topic_id:
+                    reply_to = archive_topic_id
+                    original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
+                    caption = f"[ARCHIVED FROM: {original_name}]"
+            else:
+                skipped_no_topic += 1
+                continue
 
-                try:
-                    await client.send_file(
-                        target_id,
-                        message.media,
-                        caption=caption,
-                        attributes=[video_attr] if video_attr else None,
-                        force_document=False,
-                        reply_to=reply_to
-                    )
-                    count += 1
-                    scraped_count += 1
-                    await save_checkpoint(source_id, message.id)
-                    await asyncio.sleep(current_delay)
-                except FloodWaitError as e:
-                    await asyncio.sleep(e.seconds)
-                    current_delay = min(current_delay * 1.5, 60)
-                except Exception as e:
-                    errors += 1
-                    logger.error(f"Send failed: {e}")
+            if not reply_to:
+                skipped_no_map += 1
+                continue
+
+            try:
+                await client.send_file(
+                    target_id,
+                    message.media,
+                    caption=caption,
+                    attributes=[video_attr] if video_attr else None,
+                    force_document=False,
+                    reply_to=reply_to
+                )
+                count += 1
+                scraped_count += 1
+                await save_checkpoint(source_id, message.id)
+                await asyncio.sleep(current_delay)
+            except FloodWaitError as e:
+                await asyncio.sleep(e.seconds)
+                current_delay = min(current_delay * 1.5, 60)
+            except Exception as e:
+                errors += 1
+                logger.error(f"Send failed: {e}")
 
         await save_checkpoint(source_id, 0)
-        final = f"**Topic scrape done**\nChecked: `{checked}`\nUploaded: `{count}`\nSkipped >{MAX_FILE_SIZE//1024//1024}MB: `{skipped_count}`\nErrors: `{errors}`"
+        final = (
+            f"**Topic scrape done**\n"
+            f"Checked: `{checked}`\n"
+            f"Uploaded: `{count}`\n"
+            f"Skipped General: `{skipped_general}`\n"
+            f"Skipped No Topic: `{skipped_no_topic}`\n"
+            f"Skipped No Video: `{skipped_no_video}`\n"
+            f"Skipped >200MB: `{skipped_too_large}`\n"
+            f"Skipped No Map: `{skipped_no_map}`\n"
+            f"Errors: `{errors}`"
+        )
         if archive_topic_id:
-            final += f"\nOverflow sent to Archive topic with source names preserved"
+            final += f"\nArchive ID: `{archive_topic_id}`"
         await status_msg.edit(final)
 
     except Exception as e:
@@ -502,8 +525,6 @@ async def resync_group_fresh(event):
 
     await save_topic_map(source_id, target_id, new_mapping)
     await msg.edit(f"**Fresh Resync Complete**\nValid topics: `{len(src_topics)}`\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\nArchive ID: `{archive_topic_id}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
-
-
 
 
 
