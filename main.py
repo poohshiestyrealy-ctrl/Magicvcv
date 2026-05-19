@@ -250,6 +250,11 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 
 
 
+
+
+
+
+
 @client.on(events.NewMessage(pattern=r'/start'))
 async def start_cmd(event):
     if not is_admin(event.sender_id):
@@ -273,6 +278,7 @@ async def help_handler(event):
 `/debugtopics <group_id> [group_id2]` - Check if bot can see topics
 `/diag <group_id>` - Run diagnostics to check why topics aren't loading
 `/testmapping <src_id> <dst_id>` - Test if mapping exists
+`/buildmapping <src_id> <dst_id>` - Build mapping without retry loop
 
 **2. Scrape Groups:**
 `/scrapegrouplike <src_id> [fresh]` - Start scraping. Add 'fresh' to start from beginning
@@ -594,6 +600,7 @@ async def scrape_group_like(event):
 
 
 
+
 @client.on(events.NewMessage(pattern=r'/addauto (gif|short) (-?[0-9]+) (-?[0-9]+)'))
 async def add_auto(event):
     if not is_admin(event.sender_id):
@@ -804,6 +811,80 @@ async def set_topic_map_cmd(event):
     topic_map[str(source_tid)] = target_tid
     await save_topic_map(source_gid, target_gid, topic_map)
     await event.reply(f"✅ Mapped topic `{source_tid}` → `{target_tid}`")
+
+# ==================== ADDED COMMAND ====================
+@client.on(events.NewMessage(pattern=r'/buildmapping (-?[0-9]+) (-?[0-9]+)'))
+async def build_mapping(event):
+    """Build mapping using topics from last /debugtopics call - no retry loop"""
+    if not is_admin(event.sender_id):
+        return
+    src_id = int(event.pattern_match.group(1))
+    dst_id = int(event.pattern_match.group(2))
+    msg = await event.reply("Building mapping...")
+
+    try:
+        src_entity = await client.get_entity(src_id)
+        dst_entity = await client.get_entity(dst_id)
+    except Exception as e:
+        await msg.edit(f"❌ Failed to get entities: {e}")
+        return
+
+    # Get source topics
+    try:
+        src_res = await client(GetForumTopicsRequest(
+            channel=src_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200
+        ))
+        src_topics = [t for t in src_res.topics if not getattr(t, 'deleted', False) and t.id!= 1]
+    except Exception as e:
+        await msg.edit(f"❌ Failed to fetch source topics: {e}")
+        return
+
+    # Check target topics for Archive
+    try:
+        tgt_res = await client(GetForumTopicsRequest(
+            channel=dst_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100
+        ))
+        active_topics = [tt for tt in tgt_res.topics if not getattr(tt, 'deleted', False) and tt.id!= 1]
+        archive_topic = next((tt for tt in active_topics if tt.title == "Archive"), None)
+        if not archive_topic:
+            result = await client(CreateForumTopicRequest(channel=dst_entity, title="Archive"))
+            archive_topic_id = result.updates[1].topic.id
+        else:
+            archive_topic_id = archive_topic.id
+    except Exception as e:
+        await msg.edit(f"❌ Failed to setup Archive topic: {e}")
+        return
+
+    await save_archive_topic_id(src_id, dst_id, archive_topic_id)
+
+    new_mapping = {}
+    created = 0
+    skipped = 0
+    available_slots = 100 - len(active_topics)
+
+    await msg.edit(f"Found {len(src_topics)} topics. Creating {min(len(src_topics), available_slots)}...")
+
+    for t in src_topics:
+        if created >= available_slots:
+            new_mapping[str(t.id)] = archive_topic_id
+            skipped += 1
+            continue
+        try:
+            result = await client(CreateForumTopicRequest(
+                channel=dst_entity,
+                title=t.title[:128],
+                icon_emoji_id=getattr(t, 'icon_emoji_id', None)
+            ))
+            new_id = result.updates[1].topic.id
+            new_mapping[str(t.id)] = new_id
+            created += 1
+            await asyncio.sleep(2)
+        except Exception:
+            new_mapping[str(t.id)] = archive_topic_id
+            skipped += 1
+
+    await save_topic_map(src_id, dst_id, new_mapping)
+    await msg.edit(f"**Mapping Built**\nCreated: `{created}`\nSkipped to Archive: `{skipped}`\n\nRun `/testmapping {src_id} {dst_id}` to verify.")
 
 async def main():
     await load_sources()
