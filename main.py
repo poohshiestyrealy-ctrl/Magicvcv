@@ -685,10 +685,69 @@ async def debug_topics(event):
                 output.append(f"ID:`{t.id}` Title:`{t.title}` Deleted:{getattr(t, 'deleted', False)}")
 
         full_text = "\n".join(output)
-        # Split into multiple messages to avoid truncation
         for i in range(0, len(full_text), 4000):
             await event.reply(full_text[i:i+4000])
         await msg.delete()
+    except Exception as e:
+        await msg.edit(f"Error: {e}")
+
+@client.on(events.NewMessage(pattern=r'/debugvideos (-?[0-9]+)'))
+async def debug_videos(event):
+    if not is_admin(event.sender_id):
+        return
+
+    group_id = int(event.pattern_match.group(1))
+    msg = await event.reply("Scanning for 2 random videos...")
+
+    found = []
+    checked = 0
+
+    try:
+        async for message in client.iter_messages(group_id, limit=2000):
+            if len(found) >= 2:
+                break
+
+            checked += 1
+            if not is_video_message(message):
+                continue
+
+            video_attr = get_video_attr(message)
+            if not video_attr:
+                continue
+
+            duration = getattr(video_attr, 'duration', 'NO_ATTR')
+            width = getattr(video_attr, 'w', 'NO_ATTR')
+            height = getattr(video_attr, 'h', 'NO_ATTR')
+            file_size = getattr(message.file, 'size', 0)
+            file_name = getattr(message.file, 'name', 'NoName')
+
+            found.append({
+                'msg_id': message.id,
+                'duration': duration,
+                'width': width,
+                'height': height,
+                'size_bytes': file_size,
+                'size_mb': round(file_size / 1024 / 1024, 2),
+                'name': file_name
+            })
+
+            if checked % 100 == 0:
+                await msg.edit(f"Checked {checked} msgs... Found {len(found)}/2 videos")
+
+        if not found:
+            await msg.edit(f"Checked {checked} messages. No videos found.")
+            return
+
+        output = [f"**Found {len(found)} videos in first {checked} messages:**\n"]
+        for i, v in enumerate(found, 1):
+            output.append(f"**Video {i}** - MsgID: `{v['msg_id']}`")
+            output.append(f"Duration: `{v['duration']}` seconds")
+            output.append(f"Resolution: `{v['width']}x{v['height']}`")
+            output.append(f"Size: `{v['size_mb']}MB` (`{v['size_bytes']}` bytes)")
+            output.append(f"Filename: `{v['name']}`\n")
+
+        await msg.edit("\n".join(output))
+
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
@@ -707,7 +766,7 @@ async def shorts_handler(event):
 
     count = checked = errors = skipped_duration = skipped_size = skipped_no_video = 0
     current_delay = SHORTS_DELAY
-    MAX_SHORTS_SIZE = 30 * 1024 * 1024 # 30MB
+    MAX_SHORTS_SIZE_DURATION_ZERO = 10 * 1024 * 1024 # 10MB if duration=0
 
     try:
         async for message in client.iter_messages(source_id, limit=None):
@@ -729,18 +788,17 @@ async def shorts_handler(event):
                 continue
 
             duration = getattr(video_attr, 'duration', 0)
+            file_size = getattr(message.file, 'size', 0)
 
             # If duration > 60, skip
             if duration > 60:
                 skipped_duration += 1
                 continue
 
-            # If duration is 0, check file size <= 30MB
-            if duration == 0:
-                file_size = getattr(message.file, 'size', 0)
-                if file_size > MAX_SHORTS_SIZE:
-                    skipped_size += 1
-                    continue
+            # If duration is 0, only accept if file size <= 10MB
+            if duration == 0 and file_size > MAX_SHORTS_SIZE_DURATION_ZERO:
+                skipped_size += 1
+                continue
 
             try:
                 await client.forward_messages(target_id, message)
@@ -757,10 +815,9 @@ async def shorts_handler(event):
                 errors += 1
                 logger.error(f"Forward/delete failed: {e}")
 
-        await msg.edit(f"**Shorts Complete**\nChecked: `{checked}`\nForwarded & Deleted: `{count}`\nSkipped Duration>60s: `{skipped_duration}`\nSkipped Size>30MB: `{skipped_size}`\nSkipped NoVideo: `{skipped_no_video}`\nErrors: `{errors}`")
+        await msg.edit(f"**Shorts Complete**\nChecked: `{checked}`\nForwarded & Deleted: `{count}`\nSkipped Duration>60s: `{skipped_duration}`\nSkipped Size>10MB: `{skipped_size}`\nSkipped NoVideo: `{skipped_no_video}`\nErrors: `{errors}`")
     except Exception as e:
         await msg.edit(f"Shorts failed: {e}")
-
 
 
 
