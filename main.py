@@ -705,8 +705,9 @@ async def shorts_handler(event):
     target_id = int(event.pattern_match.group(2))
     msg = await event.reply("Starting /shorts: forwarding videos ≤60s...")
 
-    count = checked = errors = 0
+    count = checked = errors = skipped_duration = skipped_size = skipped_no_video = 0
     current_delay = SHORTS_DELAY
+    MAX_SHORTS_SIZE = 30 * 1024 * 1024 # 30MB
 
     try:
         async for message in client.iter_messages(source_id, limit=None):
@@ -716,16 +717,30 @@ async def shorts_handler(event):
 
             checked += 1
             if checked % 200 == 0:
-                await msg.edit(f"Checked: {checked}\nForwarded: {count}\nErrors: {errors}")
+                await msg.edit(f"Checked: {checked}\nForwarded: {count}\nSkip Duration: {skipped_duration}\nSkip Size: {skipped_size}\nSkip NoVideo: {skipped_no_video}\nErrors: {errors}")
 
             if not is_video_message(message):
+                skipped_no_video += 1
                 continue
 
             video_attr = get_video_attr(message)
+            if not video_attr:
+                skipped_no_video += 1
+                continue
+
             duration = getattr(video_attr, 'duration', 0)
 
-            if duration > 60 or duration == 0:
+            # If duration > 60, skip
+            if duration > 60:
+                skipped_duration += 1
                 continue
+
+            # If duration is 0, check file size <= 30MB
+            if duration == 0:
+                file_size = getattr(message.file, 'size', 0)
+                if file_size > MAX_SHORTS_SIZE:
+                    skipped_size += 1
+                    continue
 
             try:
                 await client.forward_messages(target_id, message)
@@ -735,14 +750,16 @@ async def shorts_handler(event):
             except FloodWaitError as e:
                 await asyncio.sleep(e.seconds)
                 current_delay = min(current_delay * 1.5, 60)
+            except ChatAdminRequiredError:
+                await msg.edit("❌ Bot needs 'Delete Messages' admin right in source to use /shorts")
+                return
             except Exception as e:
                 errors += 1
                 logger.error(f"Forward/delete failed: {e}")
 
-        await msg.edit(f"**Shorts Complete**\nChecked: `{checked}`\nForwarded & Deleted: `{count}`\nErrors: `{errors}`")
+        await msg.edit(f"**Shorts Complete**\nChecked: `{checked}`\nForwarded & Deleted: `{count}`\nSkipped Duration>60s: `{skipped_duration}`\nSkipped Size>30MB: `{skipped_size}`\nSkipped NoVideo: `{skipped_no_video}`\nErrors: `{errors}`")
     except Exception as e:
         await msg.edit(f"Shorts failed: {e}")
-
 
 
 
