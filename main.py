@@ -50,16 +50,55 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 def get_video_attr(message):
-    if message.video:
-        return message.video
-    if message.document:
-        for attr in message.document.attributes:
-            if isinstance(attr, DocumentAttributeVideo):
-                return attr
+    if not message.media:
+        return None
+
+    # Check message.video first - most common for actual videos
+    if hasattr(message, 'video') and message.video:
+        if hasattr(message.video, 'attributes'):
+            for attr in message.video.attributes:
+                if isinstance(attr, DocumentAttributeVideo):
+                    return attr
+        # Sometimes video object itself has duration/size
+        if hasattr(message.video, 'duration'):
+            return message.video
+
+    # Check message.document - for videos sent as files
+    if hasattr(message, 'document') and message.document:
+        if hasattr(message.document, 'attributes'):
+            for attr in message.document.attributes:
+                if isinstance(attr, DocumentAttributeVideo):
+                    return attr
+
+    # Check message.media.document - fallback
+    if hasattr(message.media, 'document') and message.media.document:
+        if hasattr(message.media.document, 'attributes'):
+            for attr in message.media.document.attributes:
+                if isinstance(attr, DocumentAttributeVideo):
+                    return attr
+
     return None
 
 def is_video_message(message):
-    return get_video_attr(message) is not None
+    if not message.media:
+        return False
+
+    # True video
+    if hasattr(message, 'video') and message.video:
+        return True
+
+    # Document with video mime
+    if hasattr(message, 'document') and message.document:
+        mime = getattr(message.document, 'mime_type', '')
+        if mime and mime.startswith('video/'):
+            return True
+        # Check attributes for video
+        if hasattr(message.document, 'attributes'):
+            for attr in message.document.attributes:
+                if isinstance(attr, DocumentAttributeVideo):
+                    return True
+
+    return False
 
 def meets_resolution(video_attr):
     if not video_attr:
@@ -153,7 +192,6 @@ async def get_archive_topic_id(source_id, target_id):
     except Exception as e:
         logger.error(f"get_archive_topic_id error: {e}")
         return None
-
 
 
 
@@ -712,14 +750,13 @@ async def debug_videos(event):
                 continue
 
             video_attr = get_video_attr(message)
-            if not video_attr:
-                continue
+            duration = getattr(video_attr, 'duration', 0) if video_attr else 'NO_ATTR'
+            width = getattr(video_attr, 'w', 'NO_ATTR') if video_attr else 'NO_ATTR'
+            height = getattr(video_attr, 'h', 'NO_ATTR') if video_attr else 'NO_ATTR'
 
-            duration = getattr(video_attr, 'duration', 'NO_ATTR')
-            width = getattr(video_attr, 'w', 'NO_ATTR')
-            height = getattr(video_attr, 'h', 'NO_ATTR')
             file_size = getattr(message.file, 'size', 0)
             file_name = getattr(message.file, 'name', 'NoName')
+            mime = getattr(message.file, 'mime_type', 'unknown')
 
             found.append({
                 'msg_id': message.id,
@@ -727,8 +764,10 @@ async def debug_videos(event):
                 'width': width,
                 'height': height,
                 'size_bytes': file_size,
-                'size_mb': round(file_size / 1024 / 1024, 2),
-                'name': file_name
+                'size_mb': round(file_size / 1024, 2),
+                'name': file_name,
+                'mime': mime,
+                'has_attr': video_attr is not None
             })
 
             if checked % 100 == 0:
@@ -741,9 +780,11 @@ async def debug_videos(event):
         output = [f"**Found {len(found)} videos in first {checked} messages:**\n"]
         for i, v in enumerate(found, 1):
             output.append(f"**Video {i}** - MsgID: `{v['msg_id']}`")
+            output.append(f"HasVideoAttr: `{v['has_attr']}`")
             output.append(f"Duration: `{v['duration']}` seconds")
             output.append(f"Resolution: `{v['width']}x{v['height']}`")
             output.append(f"Size: `{v['size_mb']}MB` (`{v['size_bytes']}` bytes)")
+            output.append(f"Mime: `{v['mime']}`")
             output.append(f"Filename: `{v['name']}`\n")
 
         await msg.edit("\n".join(output))
@@ -764,9 +805,9 @@ async def shorts_handler(event):
     target_id = int(event.pattern_match.group(2))
     msg = await event.reply("Starting /shorts: forwarding videos ≤60s...")
 
-    count = checked = errors = skipped_duration = skipped_size = skipped_no_video = 0
+    count = checked = errors = skipped_duration = skipped_size = skipped_no_attr = skipped_no_video = 0
     current_delay = SHORTS_DELAY
-    MAX_SHORTS_SIZE_DURATION_ZERO = 10 * 1024 * 1024 # 10MB if duration=0
+    MAX_SHORTS_SIZE_NO_ATTR = 10 * 1024 * 1024 # 10MB if no duration info
 
     try:
         async for message in client.iter_messages(source_id, limit=None):
@@ -776,29 +817,27 @@ async def shorts_handler(event):
 
             checked += 1
             if checked % 200 == 0:
-                await msg.edit(f"Checked: {checked}\nForwarded: {count}\nSkip Duration: {skipped_duration}\nSkip Size: {skipped_size}\nSkip NoVideo: {skipped_no_video}\nErrors: {errors}")
+                await msg.edit(f"Checked: {checked}\nForwarded: {count}\nSkip Duration: {skipped_duration}\nSkip Size: {skipped_size}\nSkip NoAttr: {skipped_no_attr}\nSkip NoVideo: {skipped_no_video}\nErrors: {errors}")
 
             if not is_video_message(message):
                 skipped_no_video += 1
                 continue
 
             video_attr = get_video_attr(message)
-            if not video_attr:
-                skipped_no_video += 1
-                continue
-
-            duration = getattr(video_attr, 'duration', 0)
             file_size = getattr(message.file, 'size', 0)
 
-            # If duration > 60, skip
-            if duration > 60:
-                skipped_duration += 1
-                continue
-
-            # If duration is 0, only accept if file size <= 10MB
-            if duration == 0 and file_size > MAX_SHORTS_SIZE_DURATION_ZERO:
-                skipped_size += 1
-                continue
+            if not video_attr:
+                if file_size > MAX_SHORTS_SIZE_NO_ATTR:
+                    skipped_no_attr += 1
+                    continue
+            else:
+                duration = getattr(video_attr, 'duration', 0)
+                if duration > 60:
+                    skipped_duration += 1
+                    continue
+                if duration == 0 and file_size > MAX_SHORTS_SIZE_NO_ATTR:
+                    skipped_size += 1
+                    continue
 
             try:
                 await client.forward_messages(target_id, message)
@@ -815,7 +854,7 @@ async def shorts_handler(event):
                 errors += 1
                 logger.error(f"Forward/delete failed: {e}")
 
-        await msg.edit(f"**Shorts Complete**\nChecked: `{checked}`\nForwarded & Deleted: `{count}`\nSkipped Duration>60s: `{skipped_duration}`\nSkipped Size>10MB: `{skipped_size}`\nSkipped NoVideo: `{skipped_no_video}`\nErrors: `{errors}`")
+        await msg.edit(f"**Shorts Complete**\nChecked: `{checked}`\nForwarded & Deleted: `{count}`\nSkipped Duration>60s: `{skipped_duration}`\nSkipped Size>10MB: `{skipped_size}`\nSkipped NoAttr>10MB: `{skipped_no_attr}`\nSkipped NoVideo: `{skipped_no_video}`\nErrors: `{errors}`")
     except Exception as e:
         await msg.edit(f"Shorts failed: {e}")
 
