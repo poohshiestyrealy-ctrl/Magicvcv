@@ -193,10 +193,6 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
-
-
-
-
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count, KILL_SWITCH
     topic_map = await get_topic_map(source_id, target_id)
@@ -495,11 +491,6 @@ async def shorts_handler(event):
 
 
 
-
-
-
-
-
 @client.on(events.NewMessage(pattern=r'/help'))
 async def help_handler(event):
     if not is_admin(event.sender_id):
@@ -527,7 +518,7 @@ async def help_handler(event):
 `/shorts <src_id> <dst_id>` - Forward videos ≤60s + delete from source
 
 **🧹 4. Dedupe**
-`/dedupe <target_id> [dryrun]` - Delete duplicate videos, keeps oldest. Add 'dryrun' to preview
+`/dedupe <target_id> [dryrun]` - Delete duplicate videos, keeps oldest. Sends sample videos. Add 'dryrun' to preview
 
 **📊 5. Other**
 `/stats` - Show stats
@@ -628,21 +619,6 @@ async def stats_handler(event):
         return
     await event.reply(f"**📊 Bot Stats**\n├ Scraped: `{scraped_count}`\n├ Skipped: `{skipped_count}`\n└ Mappings: `{len(CONFIG['sources'])}`")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @client.on(events.NewMessage(pattern=r'/dedupe (-?[0-9]+)(?:\s+(dryrun))?'))
 async def dedupe_target(event):
     if not is_admin(event.sender_id):
@@ -721,47 +697,57 @@ async def dedupe_target(event):
         await event.reply(f"❌ Dedupe failed: {e}")
         return
 
-    # Build sample output: find groups with 2+ videos
-    sample_text = []
+    # Build sample output with actual videos
     dup_groups = [msgs for msgs in duplicate_groups.values() if len(msgs) > 1]
-
-    if dup_groups:
-        sample_text.append("**Sample duplicates found:**\n")
-        shown = 0
-        for group in dup_groups:
-            if shown >= 2: # Show max 2 groups = 4+ videos
-                break
-            shown += 1
-            sample_text.append(f"**Group {shown}**:")
-
-            for i, m in enumerate(group[:2], 1): # Show 2 videos per group
-                date_str = m.date.strftime("%Y-%m-%d %H:%M UTC")
-
-                if is_forum:
-                    topic_id = getattr(m, 'reply_to_topic_id', None)
-                    topic_name = topic_name_map.get(topic_id, f"Topic {topic_id}") if topic_id else "General"
-                    sample_text.append(f" {i}. Msg `{m.id}` | {date_str} | Topic: `{topic_name}`")
-                else:
-                    sample_text.append(f" {i}. Msg `{m.id}` | {date_str}")
-
-            if len(group) > 2:
-                sample_text.append(f" +{len(group)-2} more identical copies")
-            sample_text.append("")
-    else:
-        sample_text.append("**No duplicates found in channel/group.**")
 
     result = (
         f"**✅ Dedupe complete**\n"
         f"├ Checked: `{checked_count}`\n"
         f"├ Unique: `{len(seen_hashes)}`\n"
         f"├ Deleted: `{deleted_count}`\n"
-        f"└ Mode: Kept oldest copies\n\n"
-        + "\n".join(sample_text)
+        f"└ Mode: Kept oldest copies\n"
     )
     if dry_run:
-        result += "\n**DRY RUN** - No files deleted. Run without `dryrun` to actually delete."
+        result += "\n**DRY RUN** - No files deleted. Run without `dryrun` to actually delete.\n"
 
-    await msg.edit(result[:4000])
+    await msg.edit(result)
+
+    if dup_groups:
+        await event.reply("**📹 Sample duplicates found:**")
+        shown = 0
+        for group in dup_groups:
+            if shown >= 2: # Send max 2 groups = 4 videos
+                break
+            shown += 1
+            await event.reply(f"**Duplicate Group {shown} - {len(group)} copies:**")
+
+            for i, m in enumerate(group[:2], 1): # Send 2 videos per group
+                date_str = m.date.strftime("%Y-%m-%d %H:%M UTC")
+                caption = f"Copy {i} | Msg `{m.id}` | {date_str}"
+
+                if is_forum:
+                    topic_id = getattr(m, 'reply_to_topic_id', None)
+                    topic_name = topic_name_map.get(topic_id, f"Topic {topic_id}") if topic_id else "General"
+                    caption += f" | Topic: `{topic_name}`"
+
+                if i == 1:
+                    caption += " ← **KEPT**"
+                else:
+                    caption += " ← **DUPLICATE**"
+
+                try:
+                    await client.send_file(event.chat_id, m.media, caption=caption)
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    await event.reply(f"Failed to send video {m.id}: {e}")
+
+            if len(group) > 2:
+                await event.reply(f"+{len(group)-2} more identical copies not shown")
+            await asyncio.sleep(1)
+    else:
+        await event.reply("**No duplicates found in channel/group.**")
+
+
 
 # ==================== MAIN ====================
 async def main():
