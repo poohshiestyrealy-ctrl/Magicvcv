@@ -1,6 +1,9 @@
 import os
 import asyncio
 import logging
+import hashlib
+from collections import defaultdict
+from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
@@ -10,7 +13,6 @@ from supabase import create_client, Client
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 
 # ==================== CONFIG ====================
 API_ID = int(os.getenv("API_ID"))
@@ -179,13 +181,6 @@ async def get_archive_topic_id(source_id, target_id):
     except Exception as e:
         logger.error(f"get_archive_topic_id error: {e}")
         return None
-
-
-
-
-
-
-
 
 
 
@@ -405,21 +400,6 @@ async def scrape_channel_handler(event):
         await msg.edit(f"❌ Scrape failed: {e}")
         await send_log(f"Scrape error: {e}")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @client.on(events.NewMessage(pattern=r'/shorts (-?[0-9]+) (-?[0-9]+)'))
 async def shorts_handler(event):
     global KILL_SWITCH
@@ -497,6 +477,18 @@ async def shorts_handler(event):
         )
     except Exception as e:
         await msg.edit(f"❌ Shorts failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
 
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resync_group_fresh(event):
@@ -660,24 +652,6 @@ async def resync_group_fresh(event):
                     await asyncio.sleep(5)
     await save_topic_map(source_id, target_id, new_mapping)
     await msg.edit(f"**✅ Fresh Resync Complete**\n├ Valid topics: `{len(src_topics)}`\n├ Created: `{created}`\n├ Skipped to Archive: `{skipped}`\n└ Archive ID: `{archive_topic_id}`\n\nRun `/scrapegrouplike {source_id} fresh` to start scraping.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 @client.on(events.NewMessage(pattern=r'/testmapping (-?[0-9]+) (-?[0-9]+)'))
 async def test_mapping(event):
@@ -890,6 +864,59 @@ async def start_cmd(event):
         "Send `/help` to see all commands."
     )
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @client.on(events.NewMessage(pattern=r'/help'))
 async def help_handler(event):
     if not is_admin(event.sender_id):
@@ -916,7 +943,10 @@ async def help_handler(event):
 **🎬 3. Shorts**
 `/shorts <src_id> <dst_id>` - Forward videos ≤60s + delete from source
 
-**📊 4. Other**
+**🧹 4. Dedupe**
+`/dedupe <target_id> [dryrun]` - Delete duplicate videos, keeps oldest. Add 'dryrun' to preview
+
+**📊 5. Other**
 `/stats` - Show stats
 `/debugvideos <group_id>` - Sample 2 videos with metadata
 
@@ -1014,6 +1044,126 @@ async def stats_handler(event):
     if not is_admin(event.sender_id):
         return
     await event.reply(f"**📊 Bot Stats**\n├ Scraped: `{scraped_count}`\n├ Skipped: `{skipped_count}`\n└ Mappings: `{len(CONFIG['sources'])}`")
+
+@client.on(events.NewMessage(pattern=r'/dedupe (-?[0-9]+)(?:\s+(dryrun))?'))
+async def dedupe_target(event):
+    if not is_admin(event.sender_id):
+        return
+
+    target_id = int(event.pattern_match.group(1))
+    dry_run = event.pattern_match.group(2) == 'dryrun'
+
+    msg = await event.reply("**🧹 Starting dedupe scan oldest→newest...**\nCollecting samples...")
+
+    seen_hashes = {} # hash -> first_message_id
+    duplicate_groups = defaultdict(list) # hash -> [message objects]
+    deleted_count = 0
+    checked_count = 0
+
+    # Check if target is forum group and build topic map
+    topic_name_map = {}
+    is_forum = False
+    try:
+        entity = await client.get_entity(target_id)
+        if getattr(entity, 'forum', False):
+            is_forum = True
+            topics_res = await client(GetForumTopicsRequest(channel=entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
+            for t in topics_res.topics:
+                topic_name_map[t.id] = t.title
+            topic_name_map[1] = "General"
+    except:
+        pass
+
+    try:
+        # reverse=True = oldest first, keeps oldest copy
+        async for message in client.iter_messages(target_id, limit=None, reverse=True):
+            if not is_video_message(message):
+                continue
+
+            checked_count += 1
+
+            # Quick hash: size + duration + first 5MB
+            h = hashlib.md5()
+            h.update(str(message.file.size).encode())
+            h.update(str(getattr(get_video_attr(message), 'duration', 0)).encode())
+
+            bytes_read = 0
+            async for chunk in client.iter_download(message.media, chunk_size=1024*1024):
+                h.update(chunk)
+                bytes_read += len(chunk)
+                if bytes_read >= 5 * 1024 * 1024:
+                    break
+
+            file_hash = h.hexdigest()
+            duplicate_groups[file_hash].append(message)
+
+            if file_hash in seen_hashes:
+                deleted_count += 1
+                if not dry_run:
+                    try:
+                        await message.delete()
+                        await asyncio.sleep(1)
+                    except Exception as e:
+                        logger.error(f"Delete failed for {message.id}: {e}")
+            else:
+                seen_hashes[file_hash] = message.id
+
+            if checked_count % 100 == 0:
+                try:
+                    await msg.edit(
+                        f"**🧹 Deduping...**\n"
+                        f"├ Checked: `{checked_count}`\n"
+                        f"├ Unique: `{len(seen_hashes)}`\n"
+                        f"└ Deleted: `{deleted_count}`"
+                    )
+                except:
+                    pass
+
+    except Exception as e:
+        await event.reply(f"❌ Dedupe failed: {e}")
+        return
+
+    # Build sample output: find groups with 2+ videos
+    sample_text = []
+    dup_groups = [msgs for msgs in duplicate_groups.values() if len(msgs) > 1]
+
+    if dup_groups:
+        sample_text.append("**Sample duplicates found:**\n")
+        shown = 0
+        for group in dup_groups:
+            if shown >= 2: # Show max 2 groups = 4+ videos
+                break
+            shown += 1
+            sample_text.append(f"**Group {shown}**:")
+
+            for i, m in enumerate(group[:2], 1): # Show 2 videos per group
+                date_str = m.date.strftime("%Y-%m-%d %H:%M UTC")
+
+                if is_forum:
+                    topic_id = getattr(m, 'reply_to_topic_id', None)
+                    topic_name = topic_name_map.get(topic_id, f"Topic {topic_id}") if topic_id else "General"
+                    sample_text.append(f" {i}. Msg `{m.id}` | {date_str} | Topic: `{topic_name}`")
+                else:
+                    sample_text.append(f" {i}. Msg `{m.id}` | {date_str}")
+
+            if len(group) > 2:
+                sample_text.append(f" +{len(group)-2} more identical copies")
+            sample_text.append("")
+    else:
+        sample_text.append("**No duplicates found in channel/group.**")
+
+    result = (
+        f"**✅ Dedupe complete**\n"
+        f"├ Checked: `{checked_count}`\n"
+        f"├ Unique: `{len(seen_hashes)}`\n"
+        f"├ Deleted: `{deleted_count}`\n"
+        f"└ Mode: Kept oldest copies\n\n"
+        + "\n".join(sample_text)
+    )
+    if dry_run:
+        result += "\n**DRY RUN** - No files deleted. Run without `dryrun` to actually delete."
+
+    await msg.edit(result[:4000])
 
 # ==================== MAIN ====================
 async def main():
