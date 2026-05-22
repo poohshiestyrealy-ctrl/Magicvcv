@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 BOT_LOG_CHAT_ID = int(os.getenv("BOT_LOG_CHAT_ID", "0"))
 
-MAX_FILE_SIZE = 200 * 1024
+MAX_FILE_SIZE = 200 * 1024 *1024
 MIN_RESOLUTION = 720 # Minimum height in pixels
 UPLOAD_DELAY = int(os.getenv("UPLOAD_DELAY", "30")) # For /scrape and /scrapegrouplike
 SHORTS_DELAY = int(os.getenv("SHORTS_DELAY", "20")) # For /shorts only
