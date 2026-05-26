@@ -23,6 +23,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 BOT_LOG_CHAT_ID = int(os.getenv("BOT_LOG_CHAT_ID", "0"))
 
+# ===== FAILSAFE CONFIG =====
+NORMAL_BOT_USERNAME = "Lilyaga35" # REPLACE: put your normal bot username here without @
+
 MAX_FILE_SIZE = 200 * 1024 *1024
 MIN_RESOLUTION = 720 # Minimum height in pixels
 UPLOAD_DELAY = int(os.getenv("UPLOAD_DELAY", "30")) # For /scrape and /scrapegrouplike
@@ -36,6 +39,7 @@ CONFIG = {"sources": {}}
 scraped_count = 0
 skipped_count = 0
 KILL_SWITCH = False
+ME_ID = None # ADDED: stores your user id
 
 def rebuild_mapped_chats():
     global mapped_chats
@@ -193,6 +197,11 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
+
+
+
+
+
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count, KILL_SWITCH
     topic_map = await get_topic_map(source_id, target_id)
@@ -320,6 +329,8 @@ async def scrape_channel_handler(event):
     global KILL_SWITCH, scraped_count, skipped_count
     if not is_admin(event.sender_id):
         return
+    if event.chat_id != ME_ID: # FAILSAFE 1: only Saved Messages
+        return
     if KILL_SWITCH:
         await event.reply("Kill switch is active. Run `/resetkill` first.")
         return
@@ -405,6 +416,8 @@ async def shorts_handler(event):
     global KILL_SWITCH
     if not is_admin(event.sender_id):
         return
+    if event.chat_id != ME_ID: # FAILSAFE 1: only Saved Messages
+        return
     if KILL_SWITCH:
         await event.reply("Kill switch is active. Run `/resetkill` first.")
         return
@@ -415,7 +428,7 @@ async def shorts_handler(event):
 
     count = checked = errors = skipped_duration = skipped_size = skipped_no_attr = 0
     current_delay = SHORTS_DELAY
-    MAX_SHORTS_SIZE_NO_ATTR = 10 * 1024 * 1024
+    MAX_SHORTS_SIZE_NO_ATTR = 10 * 1024
 
     try:
         async for message in client.iter_messages(source_id, limit=None, filter=InputMessagesFilterVideo):
@@ -495,6 +508,12 @@ async def shorts_handler(event):
 async def help_handler(event):
     if not is_admin(event.sender_id):
         return
+    if event.chat_id!= ME_ID: # FAILSAFE 1: only Saved Messages
+        return
+    if event.is_private: # FAILSAFE 2: don't trigger in DMs to other bots
+        chat = await event.get_chat()
+        if chat.username == NORMAL_BOT_USERNAME:
+            return
     help_text = """
 **🤖 Yaga Bot Commands**
 
@@ -534,6 +553,8 @@ async def help_handler(event):
 async def list_mappings(event):
     if not is_admin(event.sender_id):
         return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
     if not CONFIG["sources"]:
         await event.reply("No mappings found")
         return
@@ -545,6 +566,8 @@ async def list_mappings(event):
 @client.on(events.NewMessage(pattern=r'/addsource (-?[0-9]+) (-?[0-9]+)'))
 async def add_source(event):
     if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
         return
     try:
         source_id = int(event.pattern_match.group(1))
@@ -560,6 +583,8 @@ async def add_source(event):
 async def remove_source(event):
     if not is_admin(event.sender_id):
         return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
     try:
         source_id = int(event.pattern_match.group(1))
         if await remove_mapping(source_id):
@@ -573,6 +598,8 @@ async def remove_source(event):
 async def clear_mapping(event):
     if not is_admin(event.sender_id):
         return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
     source_id = int(event.pattern_match.group(1))
     target_id = int(event.pattern_match.group(2))
     msg = await event.reply(f"Clearing mapping for `{source_id}` → `{target_id}`...")
@@ -585,6 +612,8 @@ async def clear_mapping(event):
 @client.on(events.NewMessage(pattern=r'/diag (-?[0-9]+)'))
 async def diag_group(event):
     if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
         return
     gid = int(event.pattern_match.group(1))
     msg = await event.reply(f"Running diagnostics on `{gid}`...")
@@ -600,6 +629,8 @@ async def diag_group(event):
 async def scrape_group_like(event):
     global KILL_SWITCH
     if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
         return
     if KILL_SWITCH:
         await event.reply("Kill switch is active. Run `/resetkill` first.")
@@ -617,11 +648,15 @@ async def scrape_group_like(event):
 async def stats_handler(event):
     if not is_admin(event.sender_id):
         return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
     await event.reply(f"**📊 Bot Stats**\n├ Scraped: `{scraped_count}`\n├ Skipped: `{skipped_count}`\n└ Mappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage(pattern=r'/dedupe (-?[0-9]+)(?:\s+(dryrun))?'))
 async def dedupe_target(event):
     if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
         return
 
     target_id = int(event.pattern_match.group(1))
@@ -749,11 +784,218 @@ async def dedupe_target(event):
 
 
 
+
+
+
+
+
+
+
+
+
+@client.on(events.NewMessage(pattern=r'/killall'))
+async def kill_all(event):
+    global KILL_SWITCH
+    if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
+    KILL_SWITCH = True
+    await event.reply("**🛑 Kill switch activated**\nAll scrapers will stop at next checkpoint")
+    await send_log("Kill switch activated")
+
+@client.on(events.NewMessage(pattern=r'/resetkill'))
+async def reset_kill(event):
+    global KILL_SWITCH
+    if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
+    KILL_SWITCH = False
+    await event.reply("**✅ Kill switch reset**\nScrapers can run again")
+    await send_log("Kill switch reset")
+
+@client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
+async def resync_group_fresh(event):
+    if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+    msg = await event.reply(f"**🔄 Resyncing topics**\n`{source_id}` → `{target_id}`\nCloning 1:1...")
+
+    try:
+        src_entity = await client.get_entity(source_id)
+        dst_entity = await client.get_entity(target_id)
+
+        src_topics_res = await client(GetForumTopicsRequest(channel=src_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
+        src_topics = {t.title: t.id for t in src_topics_res.topics}
+
+        dst_topics_res = await client(GetForumTopicsRequest(channel=dst_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
+        dst_topics = {t.title: t.id for t in dst_topics_res.topics}
+
+        topic_map = {}
+        created = 0
+
+        for src_name, src_tid in src_topics.items():
+            if src_name in dst_topics:
+                topic_map[str(src_tid)] = dst_topics[src_name]
+            else:
+                try:
+                    new_topic = await client(CreateForumTopicRequest(
+                        channel=dst_entity,
+                        title=src_name,
+                        icon_color=0,
+                        icon_emoji_id=None,
+                        send_as=None
+                    ))
+                    topic_map[str(src_tid)] = new_topic.updates[0].id
+                    created += 1
+                    await asyncio.sleep(TOPIC_CREATE_DELAY)
+                except Exception as e:
+                    logger.error(f"Failed to create topic {src_name}: {e}")
+
+        # Archive topic
+        archive_id = dst_topics.get("ARCHIVE")
+        if not archive_id:
+            try:
+                arch_topic = await client(CreateForumTopicRequest(
+                    channel=dst_entity,
+                    title="ARCHIVE",
+                    icon_color=0,
+                    icon_emoji_id=None,
+                    send_as=None
+                ))
+                archive_id = arch_topic.updates[0].id
+            except Exception as e:
+                logger.error(f"Failed to create ARCHIVE: {e}")
+
+        await save_topic_map(source_id, target_id, topic_map)
+        if archive_id:
+            await save_archive_topic_id(source_id, target_id, archive_id)
+
+        await msg.edit(
+            f"**✅ Topic sync complete**\n"
+            f"├ Source topics: `{len(src_topics)}`\n"
+            f"├ Created: `{created}`\n"
+            f"├ Mapped: `{len(topic_map)}`\n"
+            f"└ Archive ID: `{archive_id}`"
+        )
+    except Exception as e:
+        await msg.edit(f"❌ Resync failed: {e}")
+
+@client.on(events.NewMessage(pattern=r'/testmapping (-?[0-9]+) (-?[0-9]+)'))
+async def test_mapping(event):
+    if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
+    source_id = int(event.pattern_match.group(1))
+    target_id = int(event.pattern_match.group(2))
+    topic_map = await get_topic_map(source_id, target_id)
+    archive_id = await get_archive_topic_id(source_id, target_id)
+
+    if not topic_map:
+        await event.reply("No topic map found. Run `/resyncgroupfresh` first")
+        return
+
+    await event.reply(f"**🧪 Testing mapping**\nSending test videos to each mapped topic...")
+
+    # Send 1 test video per mapped topic
+    test_count = 0
+    for src_tid_str, dst_tid in topic_map.items():
+        if test_count >= 3: # Limit to 3 tests to avoid spam
+            break
+        try:
+            await client.send_message(
+                target_id,
+                f"🧪 Test mapping: Source Topic `{src_tid_str}` → Dest Topic `{dst_tid}`",
+                reply_to=dst_tid
+            )
+            test_count += 1
+            await asyncio.sleep(2)
+        except Exception as e:
+            await event.reply(f"Failed test to topic `{dst_tid}`: {e}")
+
+    if archive_id:
+        try:
+            await client.send_message(
+                target_id,
+                f"🧪 Test ARCHIVE topic",
+                reply_to=archive_id
+            )
+        except Exception as e:
+            await event.reply(f"Failed test to ARCHIVE: {e}")
+
+    await event.reply(f"**✅ Sent {test_count} test messages**\nCheck target group topics")
+
+@client.on(events.NewMessage(pattern=r'/debugtopics (-?[0-9]+)'))
+async def debug_topics(event):
+    if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
+    gid = int(event.pattern_match.group(1))
+    try:
+        entity = await client.get_entity(gid)
+        res = await client(GetForumTopicsRequest(channel=entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
+        text = f"**📋 Topics in `{gid}`**\n"
+        for t in res.topics:
+            text += f"• `{t.id}`: {t.title}\n"
+        if len(text) > 4000:
+            text = text[:4000] + "\n...truncated"
+        await event.reply(text)
+    except Exception as e:
+        await event.reply(f"Error: {e}")
+
+@client.on(events.NewMessage(pattern=r'/debugvideos (-?[0-9]+)'))
+async def debug_videos(event):
+    if not is_admin(event.sender_id):
+        return
+    if event.chat_id!= ME_ID: # FAILSAFE 1
+        return
+    gid = int(event.pattern_match.group(1))
+    msg = await event.reply(f"**🔍 Sampling 2 videos from `{gid}`**...")
+    count = 0
+    try:
+        async for message in client.iter_messages(gid, limit=50, filter=InputMessagesFilterVideo):
+            if count >= 2:
+                break
+            if is_video_message(message):
+                video_attr = get_video_attr(message)
+                duration = getattr(video_attr, 'duration', 'N/A')
+                height = getattr(video_attr, 'h', 'N/A')
+                width = getattr(video_attr, 'w', 'N/A')
+                size_mb = message.file.size / 1024 / 1024 if message.file else 0
+                topic_id = getattr(message, 'reply_to_topic_id', 'None')
+
+                caption = (
+                    f"**Video {count+1}**\n"
+                    f"├ ID: `{message.id}`\n"
+                    f"├ Size: `{size_mb:.2f} MB`\n"
+                    f"├ Duration: `{duration}s`\n"
+                    f"├ Resolution: `{width}x{height}`\n"
+                    f"└ Topic: `{topic_id}`"
+                )
+                await client.send_file(event.chat_id, message.media, caption=caption)
+                count += 1
+                await asyncio.sleep(2)
+
+        if count == 0:
+            await msg.edit("No videos found in last 50 messages")
+        else:
+            await msg.edit(f"**✅ Sent {count} sample videos**")
+    except Exception as e:
+        await msg.edit(f"Error: {e}")
+
 # ==================== MAIN ====================
 async def main():
+    global ME_ID
     await client.start()
+    ME_ID = (await client.get_me()).id
     await load_sources()
-    await send_log("✅ Bot started successfully")
+    await send_log(f"✅ Bot started successfully. ME_ID: {ME_ID}")
     print("✅ Bot is running...")
     await client.run_until_disconnected()
 
