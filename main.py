@@ -198,6 +198,9 @@ async def get_archive_topic_id(source_id, target_id):
 
 
 
+
+
+
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count, KILL_SWITCH, ME_ID
     topic_map = await get_topic_map(source_id, target_id)
