@@ -234,9 +234,7 @@ async def get_archive_topic_id(source_id, target_id):
 @client.on(events.NewMessage(pattern=r'/filters'))
 async def filters_handler(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
         return
     text = "**🎛️ Current Filters**\n"
     text += f"├ Max Size: `{FILTERS['max_size_mb']} MB`\n"
@@ -249,9 +247,7 @@ async def filters_handler(event):
 @client.on(events.NewMessage(pattern=r'/setfilter (\w+) (\d+)'))
 async def setfilter_handler(event):
     global ME_ID, FILTERS
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
         return
     ftype = event.pattern_match.group(1)
     val = int(event.pattern_match.group(2))
@@ -278,9 +274,7 @@ async def setfilter_handler(event):
 @client.on(events.NewMessage(pattern=r'/listmappings'))
 async def list_mappings(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
         return
     if not CONFIG["sources"]:
         await event.reply("No mappings found")
@@ -293,9 +287,7 @@ async def list_mappings(event):
 @client.on(events.NewMessage(pattern=r'/addsource (-?[0-9]+) (-?[0-9]+)'))
 async def add_source(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
         return
     try:
         source_id = int(event.pattern_match.group(1))
@@ -313,9 +305,7 @@ async def add_source(event):
 @client.on(events.NewMessage(pattern=r'/removesource (-?[0-9]+)'))
 async def remove_source(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
         return
     try:
         source_id = int(event.pattern_match.group(1))
@@ -325,7 +315,6 @@ async def remove_source(event):
             await event.reply("❌ Failed to remove mapping")
     except Exception as e:
         await event.reply(f"Error: {e}")
-
 
 
 
