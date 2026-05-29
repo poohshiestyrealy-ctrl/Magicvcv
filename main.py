@@ -140,7 +140,6 @@ async def send_debug_audit(checked_count):
 
 
 
-
 async def load_sources():
     global CONFIG
     try:
@@ -234,7 +233,7 @@ async def get_archive_topic_id(source_id, target_id):
 @client.on(events.NewMessage(pattern=r'/filters'))
 async def filters_handler(event):
     global ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     text = "**🎛️ Current Filters**\n"
     text += f"├ Max Size: `{FILTERS['max_size_mb']} MB`\n"
@@ -247,7 +246,7 @@ async def filters_handler(event):
 @client.on(events.NewMessage(pattern=r'/setfilter (\w+) (\d+)'))
 async def setfilter_handler(event):
     global ME_ID, FILTERS
-    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     ftype = event.pattern_match.group(1)
     val = int(event.pattern_match.group(2))
@@ -274,7 +273,7 @@ async def setfilter_handler(event):
 @client.on(events.NewMessage(pattern=r'/listmappings'))
 async def list_mappings(event):
     global ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     if not CONFIG["sources"]:
         await event.reply("No mappings found")
@@ -287,7 +286,7 @@ async def list_mappings(event):
 @client.on(events.NewMessage(pattern=r'/addsource (-?[0-9]+) (-?[0-9]+)'))
 async def add_source(event):
     global ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     try:
         source_id = int(event.pattern_match.group(1))
@@ -305,7 +304,7 @@ async def add_source(event):
 @client.on(events.NewMessage(pattern=r'/removesource (-?[0-9]+)'))
 async def remove_source(event):
     global ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS: # FIXED
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     try:
         source_id = int(event.pattern_match.group(1))
@@ -315,9 +314,6 @@ async def remove_source(event):
             await event.reply("❌ Failed to remove mapping")
     except Exception as e:
         await event.reply(f"Error: {e}")
-
-
-
 
 
 
@@ -441,9 +437,7 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
 @client.on(events.NewMessage(pattern=r'/scrape (-?[0-9]+)'))
 async def scrape_channel_handler(event):
     global KILL_SWITCH, scraped_count, skipped_count, ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     if KILL_SWITCH:
         await event.reply("Kill switch is active. Run `/resetkill` first.")
@@ -458,9 +452,7 @@ async def scrape_channel_handler(event):
 @client.on(events.NewMessage(pattern=r'/scrapefresh (-?[0-9]+)'))
 async def scrapefresh_handler(event):
     global KILL_SWITCH, scraped_count, skipped_count, ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     if KILL_SWITCH:
         await event.reply("Kill switch is active. Run `/resetkill` first.")
@@ -574,9 +566,7 @@ async def scrape_channel_core(source_id, target_id, event, force_fresh=False):
 @client.on(events.NewMessage(pattern=r'/shorts (-?[0-9]+) (-?[0-9]+)'))
 async def shorts_handler(event):
     global KILL_SWITCH, ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     if KILL_SWITCH:
         await event.reply("Kill switch is active. Run `/resetkill` first.")
@@ -676,9 +666,7 @@ async def shorts_handler(event):
 @client.on(events.NewMessage(pattern=r'/help'))
 async def help_handler(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     if event.is_private and NORMAL_BOT_USERNAME:
         chat = await event.get_chat()
@@ -725,9 +713,7 @@ async def help_handler(event):
 @client.on(events.NewMessage(pattern=r'/clearmapping (-?[0-9]+) (-?[0-9]+)'))
 async def clear_mapping(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     source_id = int(event.pattern_match.group(1))
     target_id = int(event.pattern_match.group(2))
@@ -741,9 +727,7 @@ async def clear_mapping(event):
 @client.on(events.NewMessage(pattern=r'/diag (-?[0-9]+)'))
 async def diag_group(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     gid = int(event.pattern_match.group(1))
     msg = await event.reply(f"Running diagnostics on `{gid}`...")
@@ -758,9 +742,7 @@ async def diag_group(event):
 @client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+(fresh))?'))
 async def scrape_group_like(event):
     global KILL_SWITCH, ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     if KILL_SWITCH:
         await event.reply("Kill switch is active. Run `/resetkill` first.")
@@ -777,18 +759,14 @@ async def scrape_group_like(event):
 @client.on(events.NewMessage(pattern=r'/stats'))
 async def stats_handler(event):
     global ME_ID, scraped_count, skipped_count
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     await event.reply(f"**📊 Bot Stats**\n├ Scraped: `{scraped_count}`\n├ Skipped (Filters/NoMap): `{skipped_count}`\n└ Mappings: `{len(CONFIG['sources'])}`")
 
 @client.on(events.NewMessage(pattern=r'/dedupe (-?[0-9]+)(?:\s+(dryrun))?'))
 async def dedupe_target(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
 
     target_id = int(event.pattern_match.group(1))
@@ -912,9 +890,7 @@ async def dedupe_target(event):
 @client.on(events.NewMessage(pattern=r'/delays'))
 async def delays_handler(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     text = "**⚙️ Dynamic Delays**\n"
     for k, v in DELAYS.items():
@@ -925,9 +901,7 @@ async def delays_handler(event):
 @client.on(events.NewMessage(pattern=r'/setdelay (\w+) (\d+)'))
 async def setdelay_handler(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     dtype = event.pattern_match.group(1)
     val = int(event.pattern_match.group(2))
@@ -943,9 +917,7 @@ async def setdelay_handler(event):
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resyncgroupfresh_handler(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
 
     source_id = int(event.pattern_match.group(1))
@@ -994,9 +966,7 @@ async def resyncgroupfresh_handler(event):
 @client.on(events.NewMessage(pattern=r'/testmapping (-?[0-9]+) (-?[0-9]+)'))
 async def test_mapping_handler(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
 
     source_id = int(event.pattern_match.group(1))
@@ -1041,9 +1011,7 @@ async def test_mapping_handler(event):
 @client.on(events.NewMessage(pattern=r'/debugtopics (-?[0-9]+)'))
 async def debug_topics(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     gid = int(event.pattern_match.group(1))
     try:
@@ -1061,9 +1029,7 @@ async def debug_topics(event):
 @client.on(events.NewMessage(pattern=r'/debugvideos (-?[0-9]+)'))
 async def debug_videos(event):
     global ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     gid = int(event.pattern_match.group(1))
     msg = await event.reply(f"**🔍 Sampling 2 videos from `{gid}`**...")
@@ -1102,9 +1068,7 @@ async def debug_videos(event):
 @client.on(events.NewMessage(pattern=r'/killall'))
 async def kill_all_handler(event):
     global KILL_SWITCH, ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     KILL_SWITCH = True
     await event.reply("**🛑 Emergency Kill Switch Activated.** All active scrapers are stopping safely at their next message checkpoint.")
@@ -1112,9 +1076,7 @@ async def kill_all_handler(event):
 @client.on(events.NewMessage(pattern=r'/resetkill'))
 async def reset_kill_handler(event):
     global KILL_SWITCH, ME_ID
-    if not ME_ID or event.chat_id!= ME_ID:
-        return
-    if not is_admin(event.sender_id):
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
     KILL_SWITCH = False
     await event.reply("**✅ Kill Switch Deactivated.** Scrapers are re-enabled and ready to run.")
