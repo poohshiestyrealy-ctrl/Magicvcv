@@ -37,6 +37,7 @@ TOPIC_CREATE_DELAY = 60
 # ============ DYNAMIC DELAY ENGINE ============
 SAFE_DELAYS = {
     "scrape_upload": 30,
+    "scrape_copy": 12,
     "scrape_forward": 5,
     "shorts_forward": 20,
     "shorts_delete": 2
@@ -47,7 +48,7 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CONFIG = {"sources": {}}
-mapped_chats = set() # FIX: Initialize globally
+mapped_chats = set()
 scraped_count = 0
 skipped_count = 0
 KILL_SWITCH = False
@@ -132,13 +133,6 @@ async def send_debug_audit(checked_count):
     except:
         pass
     DEBUG_AUDIT_LOG.clear()
-
-
-
-
-
-
-
 
 async def load_sources():
     global CONFIG
@@ -230,6 +224,59 @@ async def get_archive_topic_id(source_id, target_id):
         logger.error(f"get_archive_topic_id error: {e}")
         return None
 
+async def ensure_archive_topic(source_id, target_id, source_name=""):
+    existing_id = await get_archive_topic_id(source_id, target_id)
+    if existing_id:
+        return existing_id
+    try:
+        tgt_entity = await client.get_entity(target_id)
+        if not getattr(tgt_entity, 'forum', False):
+            return None
+        result = await client(CreateForumTopicRequest(
+            channel=tgt_entity,
+            title=f"📦 Archive - {source_name or source_id}",
+            icon_color=0x6FB9F0
+        ))
+        archive_id = result.updates[1].message.id
+        await save_archive_topic_id(source_id, target_id, archive_id)
+        await asyncio.sleep(5)
+        return archive_id
+    except Exception as e:
+        logger.error(f"Archive topic create failed: {e}")
+        return None
+
+async def copy_video_to_target(target_id, message, caption="", reply_to=None):
+    try:
+        await client.send_message(
+            target_id,
+            file=message,
+            message=caption,
+            reply_to=reply_to
+        )
+        return "copy", True
+    except Exception as e:
+        logger.warning(f"Server copy failed for {message.id}, fallback to upload: {e}")
+        try:
+            await client.send_message(
+                target_id,
+                file=message.media,
+                message=caption,
+                reply_to=reply_to
+            )
+            return "upload", True
+        except Exception as e2:
+            logger.error(f"Both copy+upload failed for {message.id}: {e2}")
+            return "failed", False
+
+
+
+
+
+
+
+
+
+
 @client.on(events.NewMessage(pattern=r'/filters'))
 async def filters_handler(event):
     global ME_ID
@@ -315,6 +362,59 @@ async def remove_source(event):
     except Exception as e:
         await event.reply(f"Error: {e}")
 
+@client.on(events.NewMessage(pattern=r'/delays'))
+async def delays_handler(event):
+    global ME_ID
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
+        return
+    text = "**⚙️ Dynamic Delays**\n"
+    for k, v in DELAYS.items():
+        text += f"├ `{k}`: `{v}s`\n"
+    text += "\nUse `/setdelay <type> <seconds>` to change live"
+    await event.reply(text)
+
+@client.on(events.NewMessage(pattern=r'/setdelay (\w+) (\d+)'))
+async def setdelay_handler(event):
+    global ME_ID
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
+        return
+    dtype = event.pattern_match.group(1)
+    val = int(event.pattern_match.group(2))
+    if dtype not in DELAYS:
+        await event.reply(f"Invalid type. Options: {', '.join(DELAYS.keys())}")
+        return
+    if val < 1 or val > 300:
+        await event.reply("Delay must be 1-300 seconds")
+        return
+    DELAYS[dtype] = val
+    await event.reply(f"✅ Set `{dtype}` to `{val}s`")
+
+@client.on(events.NewMessage(pattern=r'/killall'))
+async def kill_all_handler(event):
+    global KILL_SWITCH, ME_ID
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
+        return
+    KILL_SWITCH = True
+    await event.reply("**🛑 Emergency Kill Switch Activated.** All active scrapers are stopping safely at their next message checkpoint.")
+
+@client.on(events.NewMessage(pattern=r'/resetkill'))
+async def reset_kill_handler(event):
+    global KILL_SWITCH, ME_ID
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
+        return
+    KILL_SWITCH = False
+    await event.reply("**✅ Kill Switch Deactivated.** Scrapers are re-enabled and ready to run.")
+
+@client.on(events.NewMessage(pattern=r'/stats'))
+async def stats_handler(event):
+    global ME_ID, scraped_count, skipped_count
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
+        return
+    await event.reply(f"**📊 Bot Stats**\n├ Scraped: `{scraped_count}`\n├ Skipped (Filters/NoMap): `{skipped_count}`\n└ Mappings: `{len(CONFIG['sources'])}`")
+
+
+
+
 
 
 
@@ -324,30 +424,38 @@ async def remove_source(event):
 
 async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count, KILL_SWITCH, ME_ID, DEBUG_AUDIT_LOG
+
+    src_entity = await client.get_entity(source_id)
+    archive_topic_id = await ensure_archive_topic(source_id, target_id, getattr(src_entity, 'title', ''))
+
     topic_map = await get_topic_map(source_id, target_id)
-    archive_topic_id = await get_archive_topic_id(source_id, target_id)
-    if not topic_map:
+    if not topic_map and not archive_topic_id:
         await status_msg.edit("No topic map found. Run `/resyncgroupfresh source_id target_id` first")
         return
+
     source_topic_names = {}
     try:
-        src_entity = await client.get_entity(source_id)
         src_topics_res = await client(GetForumTopicsRequest(channel=src_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
         for t in src_topics_res.topics:
             source_topic_names[str(t.id)] = t.title
     except Exception as e:
         logger.error(f"Failed to fetch source topic names: {e}")
+
     offset_id = 0 if force_fresh else await get_checkpoint(source_id)
     if force_fresh:
         await save_checkpoint(source_id, 0)
+
     count = checked = errors = 0
     sent_to_general = skipped_too_large = skipped_low_res = skipped_no_map = skipped_non_video = skipped_duration = 0
+    server_copies = fallback_uploads = 0
+
     try:
         async for message in client.iter_messages(source_id, limit=None, offset_id=offset_id, reverse=True, filter=InputMessagesFilterVideo):
             if KILL_SWITCH:
                 await status_msg.edit("**🛑 Scrape aborted by kill switch**")
                 await save_checkpoint(source_id, message.id)
                 return
+
             checked += 1
             if checked % 500 == 0:
                 try:
@@ -355,21 +463,20 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                         f"**🔄 Scraping Group Videos...**\n"
                         f"├ Videos Checked: `{checked}`\n"
                         f"├ Uploaded: `{count}`\n"
+                        f"├ Server Copy: `{server_copies}`\n"
+                        f"├ Fallback Upload: `{fallback_uploads}`\n"
                         f"├ To General: `{sent_to_general}`\n"
-                        f"├ Skip <{FILTERS['min_resolution']}p: `{skipped_low_res}`\n"
-                        f"├ Skip >{FILTERS['max_size_mb']}MB: `{skipped_too_large}`\n"
-                        f"├ Skip Duration: `{skipped_duration}`\n"
-                        f"├ Skip NoMap: `{skipped_no_map}`\n"
-                        f"├ Skip NonVideo: `{skipped_non_video}`\n"
                         f"└ Errors: `{errors}`"
                     )
                 except:
                     pass
                 await save_checkpoint(source_id, message.id)
                 await send_debug_audit(checked)
+
             if not message.video and not message.document:
                 skipped_non_video += 1
                 continue
+
             video_attr = get_video_attr(message)
             passes, reason = meets_filters(message, video_attr)
             if not passes:
@@ -381,45 +488,54 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
                     skipped_duration += 1
                 skipped_count += 1
                 continue
+
             src_topic_id = getattr(message, 'reply_to_topic_id', None)
             reply_to, reason = verify_topic_integrity(src_topic_id, topic_map, archive_topic_id)
+
             if reason == "GENERAL" or reason == "GENERAL_EXPLICIT":
                 sent_to_general += 1
             if not reply_to:
                 skipped_no_map += 1
                 skipped_count += 1
                 continue
+
             caption = ""
             if reason == "ORPHAN_TOPIC":
                 original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
                 caption = f"[ARCHIVED FROM: {original_name}]"
+            elif message.text:
+                caption = message.text[:1024]
+
             DEBUG_AUDIT_LOG.append({
                 "msg_id": message.id,
                 "src_topic": src_topic_id if src_topic_id else "None",
                 "dst_topic": reply_to,
                 "reason": reason
             })
-            try:
-                reply_to_param = reply_to if reply_to and reply_to!= 1 else None
-                if message.text or caption:
-                    await client.send_message(target_id, file=message.media, message=caption, reply_to=reply_to_param)
-                    await asyncio.sleep(DELAYS["scrape_upload"])
+
+            reply_to_param = reply_to if reply_to and reply_to!= 1 else None
+            method, success = await copy_video_to_target(target_id, message, caption, reply_to_param)
+
+            if success:
+                if method == "copy":
+                    server_copies += 1
+                    await asyncio.sleep(DELAYS["scrape_copy"])
                 else:
-                    await client.send_message(target_id, file=message.media, message="", reply_to=reply_to_param)
-                    await asyncio.sleep(DELAYS["scrape_forward"])
+                    fallback_uploads += 1
+                    await asyncio.sleep(DELAYS["scrape_upload"])
                 count += 1
                 scraped_count += 1
                 await save_checkpoint(source_id, message.id)
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds)
-            except Exception as e:
+            else:
                 errors += 1
-                logger.error(f"Send failed: {e}")
+
         await save_checkpoint(source_id, 0)
         final = (
             f"**✅ Topic Scrape Complete**\n"
             f"├ Videos Checked: `{checked}`\n"
             f"├ Uploaded: `{count}`\n"
+            f"├ Server Copy: `{server_copies}`\n"
+            f"├ Fallback Upload: `{fallback_uploads}`\n"
             f"├ To General: `{sent_to_general}`\n"
             f"├ Skipped <{FILTERS['min_resolution']}p: `{skipped_low_res}`\n"
             f"├ Skipped >{FILTERS['max_size_mb']}MB: `{skipped_too_large}`\n"
@@ -433,6 +549,118 @@ async def scrape_group_with_topics(source_id, target_id, status_msg, force_fresh
         await status_msg.edit(final)
     except Exception as e:
         await status_msg.edit(f"❌ Scrape failed: {e}")
+
+async def scrape_channel_core(source_id, target_id, event, force_fresh=False):
+    global KILL_SWITCH, scraped_count, skipped_count
+    KILL_SWITCH = False
+    scraped_count = 0
+    skipped_count = 0
+
+    if force_fresh:
+        await save_checkpoint(source_id, 0)
+        await send_log(f"Starting /scrapefresh for {source_id} -> {target_id}")
+        msg = await event.reply(f"**🔍 Starting Fresh Channel Scrape**\nSource: `{source_id}`\nTarget: `{target_id}`\nIgnoring checkpoint...")
+    else:
+        await send_log(f"Starting /scrape for {source_id} -> {target_id}")
+        msg = await event.reply(f"**🔍 Starting Channel Scrape**\nSource: `{source_id}`\nTarget: `{target_id}`")
+
+    destination_topics = {}
+    try:
+        tgt_entity = await client.get_entity(int(target_id))
+        if getattr(tgt_entity, 'forum', False):
+            topics_res = await client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
+            for t in topics_res.topics:
+                normalized_title = t.title.lower().replace(" ", "").replace("_", "").strip()
+                destination_topics[normalized_title] = t.id
+            destination_topics["general"] = 1
+    except Exception as e:
+        logger.debug(f"Target parsing bypassed or target channel is flat: {e}")
+
+    last_id = 0 if force_fresh else await get_checkpoint(source_id)
+    batch = 0
+    skipped_res = skipped_size = skipped_non_video = skipped_duration = errors = 0
+    server_copies = fallback_uploads = 0
+
+    try:
+        async for message in client.iter_messages(
+            int(source_id),
+            offset_id=last_id,
+            reverse=True,
+            filter=InputMessagesFilterVideo
+        ):
+            if KILL_SWITCH:
+                await msg.edit("**🛑 Scrape stopped by kill switch**")
+                await send_log("Scrape killed")
+                return
+
+            if not message.video and not message.document:
+                skipped_non_video += 1
+                continue
+
+            video_attr = get_video_attr(message)
+            passes, reason = meets_filters(message, video_attr)
+            if not passes:
+                if reason == "size":
+                    skipped_size += 1
+                elif reason == "resolution":
+                    skipped_res += 1
+                elif reason == "duration":
+                    skipped_duration += 1
+                skipped_count += 1
+                continue
+
+            reply_to = None
+            if message.text and destination_topics:
+                hashtags = [word.strip("#.,!?\"'").lower().replace(" ", "").replace("_", "") for word in message.text.split() if word.startswith("#")]
+                for tag in hashtags:
+                    if tag in destination_topics:
+                        reply_to = destination_topics[tag]
+                        break
+
+            reply_to_param = reply_to if reply_to and reply_to!= 1 else None
+            caption = message.text[:1024] if message.text else ""
+            method, success = await copy_video_to_target(int(target_id), message, caption, reply_to_param)
+
+            if success:
+                if method == "copy":
+                    server_copies += 1
+                    await asyncio.sleep(DELAYS["scrape_copy"])
+                else:
+                    fallback_uploads += 1
+                    await asyncio.sleep(DELAYS["scrape_upload"])
+                scraped_count += 1
+                await save_checkpoint(source_id, message.id)
+                batch += 1
+                if batch % 10 == 0:
+                    await msg.edit(
+                        f"**📥 Scraping Channel...**\n"
+                        f"├ Scraped: `{scraped_count}`\n"
+                        f"├ Server Copy: `{server_copies}`\n"
+                        f"├ Fallback Upload: `{fallback_uploads}`\n"
+                        f"├ Skip <{FILTERS['min_resolution']}p: `{skipped_res}`\n"
+                        f"├ Skip >{FILTERS['max_size_mb']}MB: `{skipped_size}`\n"
+                        f"├ Skip Duration: `{skipped_duration}`\n"
+                        f"├ Skip NonVideo: `{skipped_non_video}`\n"
+                        f"└ Errors: `{errors}`"
+                    )
+            else:
+                errors += 1
+
+        await msg.edit(
+            f"**✅ Channel Scrape Complete**\n"
+            f"├ Scraped: `{scraped_count}`\n"
+            f"├ Server Copy: `{server_copies}`\n"
+            f"├ Fallback Upload: `{fallback_uploads}`\n"
+            f"├ Skipped <{FILTERS['min_resolution']}p: `{skipped_res}`\n"
+            f"├ Skipped >{FILTERS['max_size_mb']}MB: `{skipped_size}`\n"
+            f"├ Skipped Duration: `{skipped_duration}`\n"
+            f"├ Skipped NonVideo: `{skipped_non_video}`\n"
+            f"└ Errors: `{errors}`"
+        )
+        await send_log(f"Scrape done: {scraped_count} scraped")
+    except Exception as e:
+        await msg.edit(f"❌ Scrape failed: {e}")
+        await send_log(f"Scrape error: {e}")
 
 @client.on(events.NewMessage(pattern=r'/scrape (-?[0-9]+)'))
 async def scrape_channel_handler(event):
@@ -464,104 +692,22 @@ async def scrapefresh_handler(event):
         return
     await scrape_channel_core(source_id, int(target_id), event, force_fresh=True)
 
-async def scrape_channel_core(source_id, target_id, event, force_fresh=False):
-    global KILL_SWITCH, scraped_count, skipped_count
-    KILL_SWITCH = False
-    scraped_count = 0
-    skipped_count = 0
-    if force_fresh:
-        await save_checkpoint(source_id, 0)
-        await send_log(f"Starting /scrapefresh for {source_id} -> {target_id}")
-        msg = await event.reply(f"**🔍 Starting Fresh Channel Scrape**\nSource: `{source_id}`\nTarget: `{target_id}`\nIgnoring checkpoint...")
-    else:
-        await send_log(f"Starting /scrape for {source_id} -> {target_id}")
-        msg = await event.reply(f"**🔍 Starting Channel Scrape**\nSource: `{source_id}`\nTarget: `{target_id}`")
-    destination_topics = {}
-    try:
-        tgt_entity = await client.get_entity(int(target_id))
-        if getattr(tgt_entity, 'forum', False):
-            topics_res = await client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
-            for t in topics_res.topics:
-                normalized_title = t.title.lower().replace(" ", "").replace("_", "").strip()
-                destination_topics[normalized_title] = t.id
-            destination_topics["general"] = 1
-    except Exception as e:
-        logger.debug(f"Target parsing bypassed or target channel is flat: {e}")
-    last_id = 0 if force_fresh else await get_checkpoint(source_id)
-    batch = 0
-    skipped_res = skipped_size = skipped_non_video = skipped_duration = errors = 0
-    try:
-        async for message in client.iter_messages(
-            int(source_id),
-            offset_id=last_id,
-            reverse=True,
-            filter=InputMessagesFilterVideo
-        ):
-            if KILL_SWITCH:
-                await msg.edit("**🛑 Scrape stopped by kill switch**")
-                await send_log("Scrape killed")
-                return
-            if not message.video and not message.document:
-                skipped_non_video += 1
-                continue
-            video_attr = get_video_attr(message)
-            passes, reason = meets_filters(message, video_attr)
-            if not passes:
-                if reason == "size":
-                    skipped_size += 1
-                elif reason == "resolution":
-                    skipped_res += 1
-                elif reason == "duration":
-                    skipped_duration += 1
-                skipped_count += 1
-                continue
-            reply_to = None
-            if message.text and destination_topics:
-                hashtags = [word.strip("#.,!?\"'").lower().replace(" ", "").replace("_", "") for word in message.text.split() if word.startswith("#")]
-                for tag in hashtags:
-                    if tag in destination_topics:
-                        reply_to = destination_topics[tag]
-                        break
-            try:
-                reply_to_param = reply_to if reply_to and reply_to!= 1 else None
-                if message.text:
-                    await client.send_message(int(target_id), file=message.media, message="", reply_to=reply_to_param)
-                    await asyncio.sleep(DELAYS["scrape_upload"])
-                else:
-                    await client.send_message(int(target_id), file=message.media, message="", reply_to=reply_to_param)
-                    await asyncio.sleep(DELAYS["scrape_forward"])
-                scraped_count += 1
-                await save_checkpoint(source_id, message.id)
-                batch += 1
-                if batch % 10 == 0:
-                    await msg.edit(
-                        f"**📥 Scraping Channel...**\n"
-                        f"├ Scraped: `{scraped_count}`\n"
-                        f"├ Skip <{FILTERS['min_resolution']}p: `{skipped_res}`\n"
-                        f"├ Skip >{FILTERS['max_size_mb']}MB: `{skipped_size}`\n"
-                        f"├ Skip Duration: `{skipped_duration}`\n"
-                        f"├ Skip NonVideo: `{skipped_non_video}`\n"
-                        f"└ Errors: `{errors}`"
-                    )
-            except FloodWaitError as e:
-                await msg.edit(f"⏳ FloodWait {e.seconds}s...")
-                await asyncio.sleep(e.seconds + 5)
-            except Exception as e:
-                logger.error(f"Error forwarding {message.id}: {e}")
-                errors += 1
-        await msg.edit(
-            f"**✅ Channel Scrape Complete**\n"
-            f"├ Scraped: `{scraped_count}`\n"
-            f"├ Skipped <{FILTERS['min_resolution']}p: `{skipped_res}`\n"
-            f"├ Skipped >{FILTERS['max_size_mb']}MB: `{skipped_size}`\n"
-            f"├ Skipped Duration: `{skipped_duration}`\n"
-            f"├ Skipped NonVideo: `{skipped_non_video}`\n"
-            f"└ Errors: `{errors}`"
-        )
-        await send_log(f"Scrape done: {scraped_count} scraped")
-    except Exception as e:
-        await msg.edit(f"❌ Scrape failed: {e}")
-        await send_log(f"Scrape error: {e}")
+@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+(fresh))?'))
+async def scrape_group_like(event):
+    global KILL_SWITCH, ME_ID
+    if not ME_ID or event.sender_id not in ADMIN_IDS:
+        return
+    if KILL_SWITCH:
+        await event.reply("Kill switch is active. Run `/resetkill` first.")
+        return
+    source_id = int(event.pattern_match.group(1))
+    force_fresh = event.pattern_match.group(2) == 'fresh'
+    target_id = CONFIG["sources"].get(str(source_id))
+    if not target_id:
+        await event.reply(f"No mapping for `{source_id}`. Use `/addsource` first")
+        return
+    msg = await event.reply("Starting group scrape...")
+    await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
 
 @client.on(events.NewMessage(pattern=r'/shorts (-?[0-9]+) (-?[0-9]+)'))
 async def shorts_handler(event):
@@ -627,12 +773,15 @@ async def shorts_handler(event):
                         break
             try:
                 reply_to_param = reply_to if reply_to and reply_to!= 1 else None
-                await client.send_message(target_id, file=message.media, message="", reply_to=reply_to_param)
-                await asyncio.sleep(DELAYS["shorts_forward"])
-                await client.delete_messages(source_id, message.id)
-                await asyncio.sleep(DELAYS["shorts_delete"])
-                count += 1
-                await save_checkpoint(source_id, message.id)
+                method, success = await copy_video_to_target(target_id, message, "", reply_to_param)
+                if success:
+                    await asyncio.sleep(DELAYS["shorts_forward"])
+                    await client.delete_messages(source_id, message.id)
+                    await asyncio.sleep(DELAYS["shorts_delete"])
+                    count += 1
+                    await save_checkpoint(source_id, message.id)
+                else:
+                    errors += 1
             except FloodWaitError as e:
                 await asyncio.sleep(e.seconds)
             except ChatAdminRequiredError:
@@ -663,6 +812,10 @@ async def shorts_handler(event):
 
 
 
+
+
+
+
 @client.on(events.NewMessage(pattern=r'/help'))
 async def help_handler(event):
     global ME_ID
@@ -679,7 +832,7 @@ async def help_handler(event):
 `/addsource <src_id> <dst_id>` - Link source to target
 `/removesource <src_id>` - Remove link
 `/listmappings` - Show all links
-`/resyncgroupfresh <src_id> <dst_id>` - Clone topics 1:1
+`/resyncgroupfresh <src_id> <dst_id>` - Clone topics 1:1 + create Archive
 `/clearmapping <src_id> <dst_id>` - Delete topic map
 `/debugtopics <group_id>` - List all topics
 `/diag <group_id>` - Run diagnostics
@@ -702,7 +855,7 @@ async def help_handler(event):
 `/filters` - Show current filter settings
 `/setfilter <type> <value>` - Change: size_mb, resolution, duration
 `/delays` - Show current delay settings
-`/setdelay <type> <seconds>` - Live change: scrape_upload, scrape_forward, shorts_forward, shorts_delete
+`/setdelay <type> <seconds>` - Live change: scrape_upload, scrape_copy, scrape_forward, shorts_forward, shorts_delete
 
 **📊 6. Other**
 `/stats` - Show stats
@@ -739,207 +892,25 @@ async def diag_group(event):
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
-@client.on(events.NewMessage(pattern=r'/scrapegrouplike (-?[0-9]+)(?:\s+(fresh))?'))
-async def scrape_group_like(event):
-    global KILL_SWITCH, ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS:
-        return
-    if KILL_SWITCH:
-        await event.reply("Kill switch is active. Run `/resetkill` first.")
-        return
-    source_id = int(event.pattern_match.group(1))
-    force_fresh = event.pattern_match.group(2) == 'fresh'
-    target_id = CONFIG["sources"].get(str(source_id))
-    if not target_id:
-        await event.reply(f"No mapping for `{source_id}`. Use `/addsource` first")
-        return
-    msg = await event.reply("Starting group scrape...")
-    await scrape_group_with_topics(source_id, int(target_id), msg, force_fresh)
-
-@client.on(events.NewMessage(pattern=r'/stats'))
-async def stats_handler(event):
-    global ME_ID, scraped_count, skipped_count
-    if not ME_ID or event.sender_id not in ADMIN_IDS:
-        return
-    await event.reply(f"**📊 Bot Stats**\n├ Scraped: `{scraped_count}`\n├ Skipped (Filters/NoMap): `{skipped_count}`\n└ Mappings: `{len(CONFIG['sources'])}`")
-
-@client.on(events.NewMessage(pattern=r'/dedupe (-?[0-9]+)(?:\s+(dryrun))?'))
-async def dedupe_target(event):
-    global ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS:
-        return
-
-    target_id = int(event.pattern_match.group(1))
-    dry_run = event.pattern_match.group(2) == 'dryrun'
-
-    msg = await event.reply("**🧹 Starting dedupe scan oldest→newest...**\nCollecting samples...")
-
-    seen_hashes = {}
-    duplicate_groups = defaultdict(list)
-    deleted_count = 0
-    checked_count = 0
-
-    topic_name_map = {}
-    is_forum = False
-    try:
-        entity = await client.get_entity(target_id)
-        if getattr(entity, 'forum', False):
-            is_forum = True
-            topics_res = await client(GetForumTopicsRequest(channel=entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
-            for t in topics_res.topics:
-                topic_name_map[t.id] = t.title
-            topic_name_map[1] = "General"
-    except Exception as e:
-        logger.debug(f"Forum check failed during dedupe initialization: {e}")
-
-    try:
-        async for message in client.iter_messages(target_id, limit=None, reverse=True):
-            if not is_video_message(message):
-                continue
-
-            checked_count += 1
-
-            h = hashlib.md5()
-            h.update(str(message.file.size).encode())
-            h.update(str(getattr(get_video_attr(message), 'duration', 0)).encode())
-
-            bytes_read = 0
-            async for chunk in client.iter_download(message.media, chunk_size=8192):
-                h.update(chunk)
-                bytes_read += len(chunk)
-                if bytes_read >= 5 * 1024:
-                    break
-
-            file_hash = h.hexdigest()
-            duplicate_groups[file_hash].append(message)
-
-            if file_hash in seen_hashes:
-                deleted_count += 1
-                if not dry_run:
-                    try:
-                        await message.delete()
-                        await asyncio.sleep(1)
-                    except Exception as e:
-                        logger.error(f"Delete failed for {message.id}: {e}")
-            else:
-                seen_hashes[file_hash] = message.id
-
-            if checked_count % 100 == 0:
-                try:
-                    await msg.edit(
-                        f"**🧹 Deduping...**\n"
-                        f"├ Checked: `{checked_count}`\n"
-                        f"├ Unique: `{len(seen_hashes)}`\n"
-                        f"└ Deleted: `{deleted_count}`"
-                    )
-                except:
-                    pass
-
-    except Exception as e:
-        await event.reply(f"❌ Dedupe failed: {e}")
-        return
-
-    dup_groups = [msgs for msgs in duplicate_groups.values() if len(msgs) > 1]
-
-    result = (
-        f"**✅ Dedupe complete**\n"
-        f"├ Checked: `{checked_count}`\n"
-        f"├ Unique: `{len(seen_hashes)}`\n"
-        f"├ Deleted: `{deleted_count}`\n"
-        f"└ Mode: Kept oldest copies\n"
-    )
-    if dry_run:
-        result += "\n**DRY RUN** - No files deleted. Run without `dryrun` to actually delete.\n"
-
-    await msg.edit(result)
-
-    if dup_groups:
-        await event.reply("**📹 Sample duplicates found:**")
-        shown = 0
-        for group in dup_groups:
-            if shown >= 2:
-                break
-            shown += 1
-            await event.reply(f"**Duplicate Group {shown} - {len(group)} copies:**")
-
-            for i, m in enumerate(group[:2], 1):
-                date_str = m.date.strftime("%Y-%m-%d %H:%M UTC")
-                caption = f"Copy {i} | Msg `{m.id}` | {date_str}"
-
-                if is_forum:
-                    topic_id = getattr(m, 'reply_to_topic_id', None)
-                    if topic_id:
-                        topic_name = topic_name_map.get(topic_id, f"Topic {topic_id}")
-                    else:
-                        topic_name = "General"
-                    caption += f" | Topic: `{topic_name}`"
-
-                if i == 1:
-                    caption += " ← **KEPT**"
-                else:
-                    caption += " ← **DUPLICATE**" if dry_run else " ← **DELETED**"
-
-                try:
-                    await client.send_file(event.chat_id, m.media, caption=caption)
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    logger.error(f"Failed to send sample {m.id}: {e}")
-
-        await event.reply(f"**Shown {shown} duplicate groups**")
-
-@client.on(events.NewMessage(pattern=r'/delays'))
-async def delays_handler(event):
-    global ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS:
-        return
-    text = "**⚙️ Dynamic Delays**\n"
-    for k, v in DELAYS.items():
-        text += f"├ `{k}`: `{v}s`\n"
-    text += "\nUse `/setdelay <type> <seconds>` to change live"
-    await event.reply(text)
-
-@client.on(events.NewMessage(pattern=r'/setdelay (\w+) (\d+)'))
-async def setdelay_handler(event):
-    global ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS:
-        return
-    dtype = event.pattern_match.group(1)
-    val = int(event.pattern_match.group(2))
-    if dtype not in DELAYS:
-        await event.reply(f"Invalid type. Options: {', '.join(DELAYS.keys())}")
-        return
-    if val < 1 or val > 300:
-        await event.reply("Delay must be 1-300 seconds")
-        return
-    DELAYS[dtype] = val
-    await event.reply(f"✅ Set `{dtype}` to `{val}s`")
-
 @client.on(events.NewMessage(pattern=r'/resyncgroupfresh (-?[0-9]+) (-?[0-9]+)'))
 async def resyncgroupfresh_handler(event):
     global ME_ID
     if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
-
     source_id = int(event.pattern_match.group(1))
     target_id = int(event.pattern_match.group(2))
-
     msg = await event.reply("**🔄 Starting topic resync...**\nFetching source topics...")
-
     try:
         src_entity = await client.get_entity(source_id)
         tgt_entity = await client.get_entity(target_id)
-
         if not getattr(tgt_entity, 'forum', False):
             await msg.edit("❌ Target is not a forum group")
             return
-
         src_topics_res = await client(GetForumTopicsRequest(channel=src_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
         tgt_topics_res = await client(GetForumTopicsRequest(channel=tgt_entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
-
         existing_titles = {t.title: t.id for t in tgt_topics_res.topics}
         new_map = {}
         created = 0
-
         for src_topic in src_topics_res.topics:
             if src_topic.title in existing_titles:
                 new_map[str(src_topic.id)] = existing_titles[src_topic.title]
@@ -956,10 +927,9 @@ async def resyncgroupfresh_handler(event):
                     await asyncio.sleep(TOPIC_CREATE_DELAY)
                 except Exception as e:
                     logger.error(f"Failed to create topic {src_topic.title}: {e}")
-
         await save_topic_map(source_id, target_id, new_map)
-        await msg.edit(f"**✅ Resync complete**\n├ Mapped: `{len(new_map)}`\n├ Created: `{created}`\n└ Use `/scrapegrouplike` to start")
-
+        archive_id = await ensure_archive_topic(source_id, target_id, getattr(src_entity, 'title', ''))
+        await msg.edit(f"**✅ Resync complete**\n├ Mapped: `{len(new_map)}`\n├ Created: `{created}`\n├ Archive ID: `{archive_id}`\n└ Use `/scrapegrouplike` to start")
     except Exception as e:
         await msg.edit(f"❌ Resync failed: {e}")
 
@@ -968,19 +938,14 @@ async def test_mapping_handler(event):
     global ME_ID
     if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
-
     source_id = int(event.pattern_match.group(1))
     target_id = int(event.pattern_match.group(2))
-
     topic_map = await get_topic_map(source_id, target_id)
     archive_id = await get_archive_topic_id(source_id, target_id)
-
     if not topic_map:
         await event.reply("No topic map found. Run `/resyncgroupfresh` first")
         return
-
     await event.reply(f"**🧪 Testing mapping**\nSending test videos to each mapped topic...")
-
     test_count = 0
     for src_tid_str, dst_tid in topic_map.items():
         if test_count >= 3:
@@ -995,7 +960,6 @@ async def test_mapping_handler(event):
             await asyncio.sleep(2)
         except Exception as e:
             await event.reply(f"Failed test to topic `{dst_tid}`: {e}")
-
     if archive_id:
         try:
             await client.send_message(
@@ -1005,7 +969,6 @@ async def test_mapping_handler(event):
             )
         except Exception as e:
             await event.reply(f"Failed test to ARCHIVE: {e}")
-
     await event.reply(f"**✅ Sent {test_count} test messages**\nCheck target group topics")
 
 @client.on(events.NewMessage(pattern=r'/debugtopics (-?[0-9]+)'))
@@ -1045,7 +1008,6 @@ async def debug_videos(event):
                 width = getattr(video_attr, 'w', 'N/A')
                 size_mb = (message.file.size / (1024 * 1024)) if message.file else 0
                 topic_id = getattr(message, 'reply_to_topic_id', 'None')
-
                 caption = (
                     f"**Video {count+1}**\n"
                     f"├ ID: `{message.id}`\n"
@@ -1057,7 +1019,6 @@ async def debug_videos(event):
                 await client.send_file(event.chat_id, message.media, caption=caption)
                 count += 1
                 await asyncio.sleep(2)
-
         if count == 0:
             await msg.edit("No videos found in last 50 messages")
         else:
@@ -1065,30 +1026,114 @@ async def debug_videos(event):
     except Exception as e:
         await msg.edit(f"Error: {e}")
 
-@client.on(events.NewMessage(pattern=r'/killall'))
-async def kill_all_handler(event):
-    global KILL_SWITCH, ME_ID
+@client.on(events.NewMessage(pattern=r'/dedupe (-?[0-9]+)(?:\s+(dryrun))?'))
+async def dedupe_target(event):
+    global ME_ID
     if not ME_ID or event.sender_id not in ADMIN_IDS:
         return
-    KILL_SWITCH = True
-    await event.reply("**🛑 Emergency Kill Switch Activated.** All active scrapers are stopping safely at their next message checkpoint.")
-
-@client.on(events.NewMessage(pattern=r'/resetkill'))
-async def reset_kill_handler(event):
-    global KILL_SWITCH, ME_ID
-    if not ME_ID or event.sender_id not in ADMIN_IDS:
+    target_id = int(event.pattern_match.group(1))
+    dry_run = event.pattern_match.group(2) == 'dryrun'
+    msg = await event.reply("**🧹 Starting dedupe scan oldest→newest...**\nCollecting samples...")
+    seen_hashes = {}
+    duplicate_groups = defaultdict(list)
+    deleted_count = 0
+    checked_count = 0
+    topic_name_map = {}
+    is_forum = False
+    try:
+        entity = await client.get_entity(target_id)
+        if getattr(entity, 'forum', False):
+            is_forum = True
+            topics_res = await client(GetForumTopicsRequest(channel=entity, offset_date=0, offset_id=0, offset_topic=0, limit=200))
+            for t in topics_res.topics:
+                topic_name_map[t.id] = t.title
+            topic_name_map[1] = "General"
+    except Exception as e:
+        logger.debug(f"Forum check failed during dedupe initialization: {e}")
+    try:
+        async for message in client.iter_messages(target_id, limit=None, reverse=True):
+            if not is_video_message(message):
+                continue
+            checked_count += 1
+            h = hashlib.md5()
+            h.update(str(message.file.size).encode())
+            h.update(str(getattr(get_video_attr(message), 'duration', 0)).encode())
+            bytes_read = 0
+            async for chunk in client.iter_download(message.media, chunk_size=8192):
+                h.update(chunk)
+                bytes_read += len(chunk)
+                if bytes_read >= 5 * 1024:
+                    break
+            file_hash = h.hexdigest()
+            duplicate_groups[file_hash].append(message)
+            if file_hash in seen_hashes:
+                deleted_count += 1
+                if not dry_run:
+                    try:
+                        await message.delete()
+                        await asyncio.sleep(1)
+                    except Exception as e:
+                        logger.error(f"Delete failed for {message.id}: {e}")
+            else:
+                seen_hashes[file_hash] = message.id
+            if checked_count % 100 == 0:
+                try:
+                    await msg.edit(
+                        f"**🧹 Deduping...**\n"
+                        f"├ Checked: `{checked_count}`\n"
+                        f"├ Unique: `{len(seen_hashes)}`\n"
+                        f"└ Deleted: `{deleted_count}`"
+                    )
+                except:
+                    pass
+    except Exception as e:
+        await event.reply(f"❌ Dedupe failed: {e}")
         return
-    KILL_SWITCH = False
-    await event.reply("**✅ Kill Switch Deactivated.** Scrapers are re-enabled and ready to run.")
+    dup_groups = [msgs for msgs in duplicate_groups.values() if len(msgs) > 1]
+    result = (
+        f"**✅ Dedupe complete**\n"
+        f"├ Checked: `{checked_count}`\n"
+        f"├ Unique: `{len(seen_hashes)}`\n"
+        f"├ Deleted: `{deleted_count}`\n"
+        f"└ Mode: Kept oldest copies\n"
+    )
+    if dry_run:
+        result += "\n**DRY RUN** - No files deleted. Run without `dryrun` to actually delete.\n"
+    await msg.edit(result)
+    if dup_groups:
+        await event.reply("**📹 Sample duplicates found:**")
+        shown = 0
+        for group in dup_groups:
+            if shown >= 2:
+                break
+            shown += 1
+            await event.reply(f"**Duplicate Group {shown} - {len(group)} copies:**")
+            for i, m in enumerate(group[:2], 1):
+                date_str = m.date.strftime("%Y-%m-%d %H:%M UTC")
+                caption = f"Copy {i} | Msg `{m.id}` | {date_str}"
+                if is_forum:
+                    topic_id = getattr(m, 'reply_to_topic_id', None)
+                    if topic_id:
+                        topic_name = topic_name_map.get(topic_id, f"Topic {topic_id}")
+                    else:
+                        topic_name = "General"
+                    caption += f" | Topic: `{topic_name}`"
+                if i == 1:
+                    caption += " ← **KEPT**"
+                else:
+                    caption += " ← **DUPLICATE**" if dry_run else " ← **DELETED**"
+                try:
+                    await client.send_file(event.chat_id, m.media, caption=caption)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.error(f"Failed to send sample {m.id}: {e}")
+        await event.reply(f"**Shown {shown} duplicate groups**")
 
 # ==================== MAIN ====================
 async def main():
     global ME_ID
     await client.start()
-
-    # Lock ME_ID instantly at startup to prevent handler race validation crashes
     ME_ID = (await client.get_me()).id
-
     await load_sources()
     await send_log(f"✅ Bot started successfully. ME_ID: {ME_ID}")
     print(f"✅ Bot is running... ME_ID: {ME_ID}")
