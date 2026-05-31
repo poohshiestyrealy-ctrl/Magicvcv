@@ -8,7 +8,7 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
-from telethon.tl.types import DocumentAttributeVideo, InputMessagesFilterVideo
+from telethon.tl.types import DocumentAttributeVideo, InputMessagesFilterVideo, MessageReplyHeader
 from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
 from supabase import create_client, Client
 
@@ -97,7 +97,7 @@ def is_video_message(message):
     return get_video_attr(message) is not None
 
 def meets_filters(message, video_attr):
-    if message.file and message.file.size > FILTERS["max_size_mb"] * 1024 * 1024:
+    if message.file and message.file.size > FILTERS["max_size_mb"] * 1024:
         return False, "size"
     if video_attr:
         height = getattr(video_attr, 'h', 0)
@@ -122,8 +122,16 @@ def verify_topic_integrity(src_topic_id, topic_map, archive_topic_id):
     else:
         return None, "NO_MAP"
 
+# === NEW HELPER: Safely extract topic ID ===
+def get_topic_id_from_message(message):
+    if hasattr(message, 'reply_to_topic_id') and message.reply_to_topic_id:
+        return message.reply_to_topic_id
+    if message.reply_to and isinstance(message.reply_to, MessageReplyHeader):
+        if hasattr(message.reply_to, 'reply_to_top_id') and message.reply_to.reply_to_top_id:
+            return message.reply_to.reply_to_top_id
+    return None
+
 async def infer_topic_from_context(source_id, message):
-    """Failsafe: If topic_id is None, scan nearby messages to guess topic"""
     try:
         context_ids = []
         async for msg in client.iter_messages(source_id, limit=25, max_id=message.id, reverse=False):
@@ -150,6 +158,9 @@ async def send_debug_audit(checked_count):
     except:
         pass
     DEBUG_AUDIT_LOG.clear()
+
+
+
 
 
 
@@ -294,6 +305,9 @@ async def copy_video_to_target(target_id, message, caption="", reply_to=None):
         except Exception as e2:
             logger.error(f"Both copy+upload failed for {message.id}: {e2}")
             return "failed", False
+
+
+
 
 
 
@@ -465,6 +479,11 @@ async def stats_handler(event):
 
 
 
+
+
+
+
+
 @client.on(events.NewMessage(pattern=r'/help'))
 async def help_handler(event):
     if event.sender_id not in ADMIN_IDS:
@@ -489,7 +508,7 @@ async def help_handler(event):
 **📥 2. Scraping**
 `/scrape <src_id>` - Channel/Group → Channel, resume from checkpoint
 `/scrapefresh <src_id>` - Channel → Channel, ignore checkpoint, start from 0
-`/scrapegrouplike <src_id> [fresh]` - Group with topics. Pass 1: Topics, Pass 2: General, Pass 3: Archive
+`/scrapegrouplike <src_id> [fresh]` - Group with topics. Pass 1: Topics, Pass 2: Archive, Pass 3: General
 `/testmapping <src_id> <dst_id>` - Send test videos OLDEST→NEWEST to verify mapping
 `/killall` - Emergency stop all scrapers
 `/resetkill` - Re-enable scrapers
@@ -706,9 +725,6 @@ async def debug_videos(event):
 
 
 
-
-
-
 async def scrape_group_with_topics_v2(source_id, target_id, status_msg, force_fresh=False):
     global scraped_count, skipped_count, KILL_SWITCH, ME_ID, DEBUG_AUDIT_LOG, SENT_VIDEO_IDS
     SENT_VIDEO_IDS.clear()
@@ -733,150 +749,266 @@ async def scrape_group_with_topics_v2(source_id, target_id, status_msg, force_fr
     if force_fresh:
         await save_checkpoint(source_id, 0)
 
-    all_videos = []
-    async for message in client.iter_messages(source_id, limit=None, offset_id=offset_id, reverse=True, filter=InputMessagesFilterVideo):
-        if KILL_SWITCH:
-            await status_msg.edit("**🛑 Scrape aborted by kill switch**")
-            return
-        all_videos.append(message)
-
-    if not all_videos:
-        await status_msg.edit("No videos found")
-        return
-
-    await status_msg.edit(f"**🔍 Collected {len(all_videos)} videos**\nStarting 3-pass scrape: Mapped → General → Archive")
-
-    passes = [
-        ("Mapped Topics", lambda tid: tid and tid!= 1 and str(tid) in topic_map),
-        ("General", lambda tid: tid == 1 or not tid),
-        ("Orphans", lambda tid: tid and tid!= 1 and str(tid) not in topic_map)
-    ]
-
     total_count = checked = errors = 0
-    sent_to_general = sent_to_archive = skipped_too_large = skipped_low_res = skipped_no_map = skipped_non_video = skipped_duration = skipped_duplicate = 0
+    sent_to_general = sent_to_archive = sent_to_mapped = 0
+    skipped_too_large = skipped_low_res = skipped_no_map = skipped_non_video = skipped_duration = skipped_duplicate = 0
     server_copies = fallback_uploads = inferred_topics = 0
     general_audit = []
 
-    for pass_name, pass_filter in passes:
+    # PASS 1: MAPPED TOPICS - Use reply_to filter for failsafe on old videos
+    await status_msg.edit("**🔄 Pass 1/3: Mapped Topics**\nUsing topic index for old videos...")
+    for src_tid_str, dst_tid in topic_map.items():
         if KILL_SWITCH:
             break
-        await status_msg.edit(f"**🔄 Pass: {pass_name}**\nProcessed: `{total_count}/{len(all_videos)}`")
+        src_tid = int(src_tid_str)
+        try:
+            async for message in client.iter_messages(source_id, reply_to=src_tid, filter=InputMessagesFilterVideo, reverse=True):
+                if KILL_SWITCH:
+                    await save_checkpoint(source_id, message.id)
+                    return
+                if message.id in SENT_VIDEO_IDS:
+                    skipped_duplicate += 1
+                    continue
 
-        for message in all_videos:
-            if KILL_SWITCH:
-                await save_checkpoint(source_id, message.id)
-                return
+                checked += 1
+                total_count += 1
 
-            if message.id in SENT_VIDEO_IDS:
-                skipped_duplicate += 1
-                continue
+                if not is_video_message(message):
+                    skipped_non_video += 1
+                    continue
 
-            src_topic_id = getattr(message, 'reply_to_topic_id', None)
-            was_inferred = False
+                video_attr = get_video_attr(message)
+                passes_filter, reason = meets_filters(message, video_attr)
+                if not passes_filter:
+                    if reason == "size":
+                        skipped_too_large += 1
+                    elif reason == "resolution":
+                        skipped_low_res += 1
+                    elif reason == "duration":
+                        skipped_duration += 1
+                    skipped_count += 1
+                    continue
 
-            if src_topic_id is None and pass_name == "Mapped Topics":
-                inferred_id = await infer_topic_from_context(source_id, message)
-                if inferred_id and str(inferred_id) in topic_map:
-                    src_topic_id = inferred_id
-                    was_inferred = True
+                # Failsafe: even if extracted_id is None, we know it came from src_tid
+                extracted_id = get_topic_id_from_message(message)
+                was_inferred = extracted_id is None
+                if was_inferred:
                     inferred_topics += 1
 
-            if not pass_filter(src_topic_id):
-                continue
-
-            checked += 1
-            total_count += 1
-
-            if not is_video_message(message):
-                skipped_non_video += 1
-                continue
-
-            video_attr = get_video_attr(message)
-            passes_filter, reason = meets_filters(message, video_attr)
-            if not passes_filter:
-                if reason == "size":
-                    skipped_too_large += 1
-                elif reason == "resolution":
-                    skipped_low_res += 1
-                elif reason == "duration":
-                    skipped_duration += 1
-                skipped_count += 1
-                continue
-
-            reply_to, route_reason = verify_topic_integrity(src_topic_id, topic_map, archive_topic_id)
-            if was_inferred:
-                route_reason = f"INFERRED_{route_reason}"
-
-            if route_reason in ["GENERAL", "GENERAL_EXPLICIT", "GENERAL_NULL", "INFERRED_GENERAL"]:
-                sent_to_general += 1
-                general_audit.append({
-                    "msg_id": message.id,
-                    "date": message.date.strftime("%Y-%m-%d %H:%M"),
-                    "src_topic_id": src_topic_id if src_topic_id else "None",
-                    "has_reply_to": hasattr(message, 'reply_to') and message.reply_to is not None,
-                    "reply_to_type": type(message.reply_to).__name__ if hasattr(message, 'reply_to') else "None",
-                    "reply_to_top_id": getattr(message.reply_to, 'reply_to_top_id', None) if hasattr(message, 'reply_to') else None,
-                    "reply_to_msg_id": getattr(message.reply_to, 'reply_to_msg_id', None) if hasattr(message, 'reply_to') else None,
-                    "route_reason": route_reason,
-                    "inferred": was_inferred,
-                    "text_preview": (message.text[:50] + "...") if message.text else "No caption"
-                })
-            if route_reason in ["ORPHAN_TOPIC", "INFERRED_ORPHAN_TOPIC"]:
-                sent_to_archive += 1
-            if not reply_to:
-                skipped_no_map += 1
-                skipped_count += 1
-                continue
-
-            caption = ""
-            if "ORPHAN" in route_reason:
-                original_name = source_topic_names.get(str(src_topic_id), f"Topic {src_topic_id}")
-                caption = f"[ARCHIVED FROM: {original_name}]"
+                caption = message.text[:1024] if message.text else ""
                 if was_inferred:
-                    caption += " [INFERRED]"
-            elif message.text:
-                caption = message.text[:1024]
+                    caption = f"[INFERRED FROM TOPIC {src_tid}] {caption}"
 
-            DEBUG_AUDIT_LOG.append({
-                "msg_id": message.id,
-                "src_topic": src_topic_id if src_topic_id else "None",
-                "dst_topic": reply_to,
-                "reason": route_reason,
-                "has_reply_to": hasattr(message, 'reply_to') and message.reply_to is not None,
-                "inferred": was_inferred
-            })
+                DEBUG_AUDIT_LOG.append({
+                    "msg_id": message.id,
+                    "src_topic": src_tid,
+                    "dst_topic": dst_tid,
+                    "reason": "MAPPED_INFERRED" if was_inferred else "MAPPED",
+                    "has_reply_to": hasattr(message, 'reply_to') and message.reply_to is not None,
+                    "inferred": was_inferred
+                })
 
-            reply_to_param = reply_to if reply_to and reply_to!= 1 else None
-            method, success = await copy_video_to_target(target_id, message, caption, reply_to_param)
+                reply_to_param = dst_tid if dst_tid!= 1 else None
+                method, success = await copy_video_to_target(target_id, message, caption, reply_to_param)
 
-            if success:
-                SENT_VIDEO_IDS.add(message.id)
-                if method == "copy":
-                    server_copies += 1
-                    await asyncio.sleep(DELAYS["scrape_copy"])
+                if success:
+                    SENT_VIDEO_IDS.add(message.id)
+                    sent_to_mapped += 1
+                    if method == "copy":
+                        server_copies += 1
+                        await asyncio.sleep(DELAYS["scrape_copy"])
+                    else:
+                        fallback_uploads += 1
+                        await asyncio.sleep(DELAYS["scrape_upload"])
+                    scraped_count += 1
                 else:
-                    fallback_uploads += 1
-                    await asyncio.sleep(DELAYS["scrape_upload"])
-                scraped_count += 1
+                    errors += 1
+
+                if checked % 100 == 0:
+                    try:
+                        await status_msg.edit(
+                            f"**🔄 Pass 1/3: Mapped Topics**\n"
+                            f"├ Checked: `{checked}`\n"
+                            f"├ To Mapped: `{sent_to_mapped}`\n"
+                            f"├ Inferred: `{inferred_topics}`\n"
+                            f"└ Errors: `{errors}`"
+                        )
+                        await send_debug_audit(checked)
+                    except:
+                        pass
+        except Exception as e:
+            logger.error(f"Failed processing topic {src_tid}: {e}")
+
+    # PASS 2: ARCHIVE - Orphans and videos with no topic metadata
+    await status_msg.edit(f"**🔄 Pass 2/3: Archive**\nProcessed: `{total_count}`")
+    async for message in client.iter_messages(source_id, limit=None, offset_id=offset_id, reverse=True, filter=InputMessagesFilterVideo):
+        if KILL_SWITCH:
+            await save_checkpoint(source_id, message.id)
+            return
+        if message.id in SENT_VIDEO_IDS:
+            skipped_duplicate += 1
+            continue
+
+        extracted_id = get_topic_id_from_message(message)
+
+        # Archive if: has topic but not mapped and not General, OR has no topic at all
+        is_orphan = (extracted_id and str(extracted_id) not in topic_map and extracted_id!= 1) or (extracted_id is None)
+        if not is_orphan:
+            continue
+
+        checked += 1
+        total_count += 1
+
+        if not is_video_message(message):
+            skipped_non_video += 1
+            continue
+
+        video_attr = get_video_attr(message)
+        passes_filter, reason = meets_filters(message, video_attr)
+        if not passes_filter:
+            if reason == "size":
+                skipped_too_large += 1
+            elif reason == "resolution":
+                skipped_low_res += 1
+            elif reason == "duration":
+                skipped_duration += 1
+            skipped_count += 1
+            continue
+
+        if not archive_topic_id:
+            skipped_no_map += 1
+            skipped_count += 1
+            continue
+
+        caption = ""
+        if extracted_id:
+            original_name = source_topic_names.get(str(extracted_id), f"Topic {extracted_id}")
+            caption = f"[ARCHIVED FROM: {original_name}]"
+        else:
+            caption = "[ARCHIVED: NO TOPIC METADATA]"
+
+        if message.text:
+            caption += f"\n{message.text[:900]}"
+
+        DEBUG_AUDIT_LOG.append({
+            "msg_id": message.id,
+            "src_topic": extracted_id if extracted_id else "None",
+            "dst_topic": archive_topic_id,
+            "reason": "ORPHAN_TOPIC",
+            "has_reply_to": hasattr(message, 'reply_to') and message.reply_to is not None,
+            "inferred": False
+        })
+
+        method, success = await copy_video_to_target(target_id, message, caption, archive_topic_id)
+
+        if success:
+            SENT_VIDEO_IDS.add(message.id)
+            sent_to_archive += 1
+            if method == "copy":
+                server_copies += 1
+                await asyncio.sleep(DELAYS["scrape_copy"])
             else:
-                errors += 1
+                fallback_uploads += 1
+                await asyncio.sleep(DELAYS["scrape_upload"])
+            scraped_count += 1
+        else:
+            errors += 1
 
-            if checked % 100 == 0:
-                try:
-                    await status_msg.edit(
-                        f"**🔄 Pass: {pass_name}**\n"
-                        f"├ Checked: `{checked}/{len(all_videos)}`\n"
-                        f"├ Uploaded: `{scraped_count}`\n"
-                        f"├ To General: `{sent_to_general}`\n"
-                        f"├ To Archive: `{sent_to_archive}`\n"
-                        f"├ Inferred: `{inferred_topics}`\n"
-                        f"└ Errors: `{errors}`"
-                    )
-                    await send_debug_audit(checked)
-                except:
-                    pass
+        if checked % 100 == 0:
+            try:
+                await status_msg.edit(
+                    f"**🔄 Pass 2/3: Archive**\n"
+                    f"├ Checked: `{checked}`\n"
+                    f"├ To Archive: `{sent_to_archive}`\n"
+                    f"└ Errors: `{errors}`"
+                )
+                await send_debug_audit(checked)
+            except:
+                pass
 
-        await save_checkpoint(source_id, all_videos[-1].id if all_videos else 0)
+    # PASS 3: GENERAL - Final catch-all
+    await status_msg.edit(f"**🔄 Pass 3/3: General**\nProcessed: `{total_count}`")
+    async for message in client.iter_messages(source_id, reply_to=1, filter=InputMessagesFilterVideo, reverse=True):
+        if KILL_SWITCH:
+            await save_checkpoint(source_id, message.id)
+            return
+        if message.id in SENT_VIDEO_IDS:
+            skipped_duplicate += 1
+            continue
+
+        checked += 1
+        total_count += 1
+
+        if not is_video_message(message):
+            skipped_non_video += 1
+            continue
+
+        video_attr = get_video_attr(message)
+        passes_filter, reason = meets_filters(message, video_attr)
+        if not passes_filter:
+            if reason == "size":
+                skipped_too_large += 1
+            elif reason == "resolution":
+                skipped_low_res += 1
+            elif reason == "duration":
+                skipped_duration += 1
+            skipped_count += 1
+            continue
+
+        reply_to, route_reason = verify_topic_integrity(1, topic_map, archive_topic_id)
+        sent_to_general += 1
+
+        general_audit.append({
+            "msg_id": message.id,
+            "date": message.date.strftime("%Y-%m-%d %H:%M"),
+            "src_topic_id": "1",
+            "has_reply_to": hasattr(message, 'reply_to') and message.reply_to is not None,
+            "reply_to_type": type(message.reply_to).__name__ if hasattr(message, 'reply_to') else "None",
+            "reply_to_top_id": getattr(message.reply_to, 'reply_to_top_id', None) if hasattr(message, 'reply_to') else None,
+            "reply_to_msg_id": getattr(message.reply_to, 'reply_to_msg_id', None) if hasattr(message, 'reply_to') else None,
+            "route_reason": route_reason,
+            "inferred": False,
+            "text_preview": (message.text[:50] + "...") if message.text else "No caption"
+        })
+
+        caption = message.text[:1024] if message.text else ""
+        DEBUG_AUDIT_LOG.append({
+            "msg_id": message.id,
+            "src_topic": 1,
+            "dst_topic": reply_to,
+            "reason": route_reason,
+            "has_reply_to": hasattr(message, 'reply_to') and message.reply_to is not None,
+            "inferred": False
+        })
+
+        reply_to_param = reply_to if reply_to and reply_to!= 1 else None
+        method, success = await copy_video_to_target(target_id, message, caption, reply_to_param)
+
+        if success:
+            SENT_VIDEO_IDS.add(message.id)
+            if method == "copy":
+                server_copies += 1
+                await asyncio.sleep(DELAYS["scrape_copy"])
+            else:
+                fallback_uploads += 1
+                await asyncio.sleep(DELAYS["scrape_upload"])
+            scraped_count += 1
+        else:
+            errors += 1
+
+        if checked % 100 == 0:
+            try:
+                await status_msg.edit(
+                    f"**🔄 Pass 3/3: General**\n"
+                    f"├ Checked: `{checked}`\n"
+                    f"├ To General: `{sent_to_general}`\n"
+                    f"└ Errors: `{errors}`"
+                )
+                await send_debug_audit(checked)
+            except:
+                pass
+
+    await save_checkpoint(source_id, 1)
 
     if general_audit and BOT_LOG_CHAT_ID!= 0:
         audit_text = f"**📋 GENERAL AUDIT - {len(general_audit)} videos**\n"
@@ -889,7 +1021,6 @@ async def scrape_group_with_topics_v2(source_id, target_id, status_msg, force_fr
                 f"├ reply_to_top_id: `{v['reply_to_top_id']}`\n"
                 f"├ reply_to_msg_id: `{v['reply_to_msg_id']}`\n"
                 f"├ Reason: `{v['route_reason']}`\n"
-                f"├ Inferred: `{v['inferred']}`\n"
                 f"└ Text: `{v['text_preview']}`\n"
             )
         if len(general_audit) > 15:
@@ -903,11 +1034,12 @@ async def scrape_group_with_topics_v2(source_id, target_id, status_msg, force_fr
         f"**✅ 3-Pass Scrape Complete**\n"
         f"├ Videos Checked: `{checked}`\n"
         f"├ Uploaded: `{scraped_count}`\n"
+        f"├ To Mapped: `{sent_to_mapped}`\n"
+        f"├ To Archive: `{sent_to_archive}`\n"
+        f"├ To General: `{sent_to_general}`\n"
+        f"├ Topics Inferred: `{inferred_topics}`\n"
         f"├ Server Copy: `{server_copies}`\n"
         f"├ Fallback Upload: `{fallback_uploads}`\n"
-        f"├ To General: `{sent_to_general}`\n"
-        f"├ To Archive: `{sent_to_archive}`\n"
-        f"├ Topics Inferred: `{inferred_topics}`\n"
         f"├ Duplicates Skipped: `{skipped_duplicate}`\n"
         f"├ Skipped <{FILTERS['min_resolution']}p: `{skipped_low_res}`\n"
         f"├ Skipped >{FILTERS['max_size_mb']}MB: `{skipped_too_large}`\n"
@@ -919,8 +1051,16 @@ async def scrape_group_with_topics_v2(source_id, target_id, status_msg, force_fr
     if archive_topic_id:
         final += f"\n**Archive ID:** `{archive_topic_id}`"
     if sent_to_general > 0:
-        final += f"\n\n**⚠️ {sent_to_general} videos went to General**\nCheck bot logs for detailed audit with exact reasons"
+        final += f"\n\n**⚠️ {sent_to_general} videos went to General**\nCheck bot logs for detailed audit"
     await status_msg.edit(final)
+
+
+
+
+
+
+
+
 
 async def scrape_channel_core(source_id, target_id, event, force_fresh=False):
     global KILL_SWITCH, scraped_count, skipped_count
@@ -1033,19 +1173,6 @@ async def scrape_channel_core(source_id, target_id, event, force_fresh=False):
     except Exception as e:
         await msg.edit(f"❌ Scrape failed: {e}")
         await send_log(f"Scrape error: {e}")
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 @client.on(events.NewMessage(pattern=r'/scrape (-?[0-9]+)'))
 async def scrape_channel_handler(event):
@@ -1205,9 +1332,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-
-
-
-             
-                
